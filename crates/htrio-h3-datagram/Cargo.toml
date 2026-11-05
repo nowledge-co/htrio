@@ -1,0 +1,49 @@
+[package]
+publish = false
+edition = "2021"
+name = "htrio-h3-datagram"
+version = "0.0.2"
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "rfc9297 extension for the h3 crate"
+documentation = "https://docs.rs/h3-datagram"
+readme = "readme.md"
+keywords = [
+    "http3",
+    "quic",
+    "rfc9297",
+]
+categories = [
+    "network-programming",
+    "web-programming",
+]
+license = "MIT"
+repository = "https://github.com/hyperium/h3"
+
+[features]
+tracing = ["dep:tracing"]
+
+[lib]
+name = "h3_datagram"
+path = "src/lib.rs"
+
+[dependencies.bytes]
+version = "1.4"
+
+[dependencies.h3]
+package = "htrio-h3"
+path = "../htrio-h3"
+version = "0.0.8"
+features = ["i-implement-a-third-party-backend-and-opt-into-breaking-changes"]
+
+[dependencies.pin-project-lite]
+version = "0.2"
+default-features = false
+
+[dependencies.tracing]
+version = "0.1.40"
+optional = true

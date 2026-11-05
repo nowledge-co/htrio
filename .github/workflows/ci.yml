@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - run: cargo check --locked -j 2 --features blocking,socks,hickory-dns
+
+  native:
+    name: Native (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          find src tests examples -name '*.rs' -print0 | xargs -0 rustfmt --edition 2021 --check
+      - name: Native regression suites
+        run: cargo test --locked -j 2 --features blocking,socks,hickory-dns,native-tls -- --test-threads=2
+      - name: Native TLS
+        run: cargo test --locked -j 2 --no-default-features --features native-tls,http2,json,query,form,cookies,multipart,stream,blocking -- --test-threads=2
+
+  features:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Plain HTTP without optional features
+        run: cargo test --locked -j 2 --no-default-features -- --test-threads=2
+      - name: Rustls without HTTP/3
+        run: cargo test --locked -j 2 --no-default-features --features rustls,http2,json,query,form,cookies,multipart,stream,blocking -- --test-threads=2
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked -j 2 --no-deps --features blocking,socks,hickory-dns
+
+  h3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Local HTTP/3 protocol regression suite
+        run: cargo test -p htrio-h3 --locked -j 2 --all-features --lib -- --test-threads=2
+      - name: Local Quinn adapter
+        run: cargo test -p htrio-h3-quinn -p htrio-h3-datagram --locked -j 2 --all-features -- --test-threads=2
