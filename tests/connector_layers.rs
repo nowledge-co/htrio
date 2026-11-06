@@ -343,11 +343,7 @@ fn concurrency_layer_blocking_client_timeout() {
         "the released connection should succeed: {first:?}"
     );
     assert!(queued.unwrap_err().is_timeout());
-    assert_eq!(
-        calls_while_queued,
-        1,
-        "queued connection reached DNS"
-    );
+    assert_eq!(calls_while_queued, 1, "queued connection reached DNS");
 
     client
         .get(url)
