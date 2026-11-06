@@ -516,6 +516,10 @@ where
     B: Buf,
     S: SendStream<B>,
 {
+    fn set_priority(&mut self, priority: i32) {
+        self.stream.set_priority(priority);
+    }
+
     fn poll_stopped(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
         self.stream.poll_stopped(cx)
     }

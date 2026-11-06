@@ -38,6 +38,123 @@ impl Resolve for HickoryDnsResolver {
             Ok(addrs)
         })
     }
+    fn resolve_service(&self, name: Name, port: u16) -> super::ServiceResolving {
+        use hickory_resolver::proto::rr::rdata::svcb::SvcParamValue;
+        use hickory_resolver::proto::rr::{RData, RecordType};
+        let resolver = self.clone();
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let resolver = resolver.state.get_or_try_init(new_resolver)?;
+            let mut owner = if port == 443 {
+                host
+            } else {
+                format!("_{port}._https.{host}")
+            };
+            let mut visited = std::collections::HashSet::new();
+            let mut chain_ttl = std::time::Duration::from_secs(86_400);
+            for _ in 0..8 {
+                if !visited.insert(owner.clone()) {
+                    return Err("HTTPS alias loop".into());
+                }
+                let lookup = match resolver.lookup(owner.clone(), RecordType::HTTPS).await {
+                    Ok(lookup) => lookup,
+                    Err(_) => return Ok(Vec::new()),
+                };
+                chain_ttl = chain_ttl.min(
+                    lookup
+                        .valid_until()
+                        .saturating_duration_since(std::time::Instant::now()),
+                );
+                let records = lookup
+                    .answers()
+                    .iter()
+                    .filter_map(|record| match &record.data {
+                        RData::HTTPS(data) => Some((&record.name, &data.0)),
+                        _ => None,
+                    })
+                    .take(16)
+                    .collect::<Vec<_>>();
+                if let Some((_, alias)) =
+                    records.iter().find(|(_, record)| record.svc_priority == 0)
+                {
+                    if alias.target_name.is_root() {
+                        return Ok(Vec::new());
+                    }
+                    owner = alias.target_name.to_utf8();
+                    continue;
+                }
+                let mut endpoints = Vec::new();
+                for (record_owner, record) in records {
+                    let target = if record.target_name.is_root() {
+                        let owner = record_owner.to_utf8();
+                        let owner = owner.trim_end_matches('.');
+                        owner
+                            .strip_prefix(&format!("_{port}._https."))
+                            .unwrap_or(owner)
+                            .to_owned()
+                    } else {
+                        record
+                            .target_name
+                            .to_utf8()
+                            .trim_end_matches('.')
+                            .to_owned()
+                    };
+                    let mut endpoint = super::ServiceEndpoint::http3(target, port);
+                    endpoint.alpn.clear();
+                    endpoint.priority = record.svc_priority;
+                    endpoint.ttl = chain_ttl;
+                    let mut usable = true;
+                    for (_, value) in &record.svc_params {
+                        match value {
+                            SvcParamValue::Mandatory(required) => {
+                                usable &= required.0.iter().all(|key| {
+                                    record.svc_params.iter().any(|(found, value)| {
+                                        found == key && !matches!(value, SvcParamValue::Unknown(_))
+                                    })
+                                });
+                            }
+                            SvcParamValue::Alpn(alpn) => {
+                                endpoint.alpn = alpn
+                                    .0
+                                    .iter()
+                                    .map(|value| value.as_bytes().to_vec())
+                                    .collect()
+                            }
+                            SvcParamValue::Port(port) => endpoint.port = *port,
+                            SvcParamValue::Ipv4Hint(hints) => endpoint.addresses.extend(
+                                hints
+                                    .0
+                                    .iter()
+                                    .map(|ip| SocketAddr::new(IpAddr::V4(ip.0), endpoint.port)),
+                            ),
+                            SvcParamValue::Ipv6Hint(hints) => endpoint.addresses.extend(
+                                hints
+                                    .0
+                                    .iter()
+                                    .map(|ip| SocketAddr::new(IpAddr::V6(ip.0), endpoint.port)),
+                            ),
+                            SvcParamValue::EchConfigList(ech) => {
+                                endpoint.ech_config_list = Some(ech.0.clone())
+                            }
+                            _ => {}
+                        }
+                    }
+                    if usable
+                        && endpoint.port != 0
+                        && endpoint.alpn.iter().any(|alpn| alpn == b"h3")
+                    {
+                        for address in &mut endpoint.addresses {
+                            address.set_port(endpoint.port);
+                        }
+                        endpoints.push(endpoint);
+                    }
+                }
+                endpoints.sort_by_key(|endpoint| endpoint.priority);
+                return Ok(endpoints);
+            }
+            Err("HTTPS alias chain exceeds limit".into())
+        })
+    }
 }
 
 impl Iterator for SocketAddrs {

@@ -69,3 +69,25 @@ pub struct PoolStats {
     /// Connections retained by the pool but no longer eligible for reuse.
     pub retiring: usize,
 }
+
+/// Request urgency and incremental response preference (RFC 9218).
+pub use h3::priority::Priority;
+
+/// Reprioritize a response through its HTTP/3 control stream.
+#[derive(Clone, Debug)]
+pub struct RequestPriority {
+    pub(crate) handle: h3::priority::Handle,
+    pub(crate) connection: quinn::Connection,
+}
+impl RequestPriority {
+    /// Update HTTP priority and the upload stream's QUIC scheduler hint.
+    /// Returns false if the connection is closing or its bounded queue is full.
+    pub fn update(&self, priority: Priority) -> bool {
+        if let Ok(stream) = quinn::VarInt::from_u64(self.handle.stream_id()) {
+            let _ = self
+                .connection
+                .set_stream_priority(stream.into(), priority.quic_priority());
+        }
+        self.handle.update(priority)
+    }
+}

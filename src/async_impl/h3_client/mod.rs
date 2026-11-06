@@ -87,6 +87,36 @@ impl H3Client {
         ))
     }
 
+    pub(crate) async fn discover(
+        &self,
+        origin: &Uri,
+        proxy: Option<&crate::proxy::Intercepted>,
+    ) -> Vec<crate::alt_svc::Alternative> {
+        if proxy.is_some_and(|proxy| proxy.uri().scheme_str() == Some("socks5h")) {
+            return Vec::new();
+        }
+        let Ok(Ok(endpoints)) =
+            tokio::time::timeout(Duration::from_millis(200), self.connector.discover(origin)).await
+        else {
+            return Vec::new();
+        };
+        endpoints
+            .into_iter()
+            .filter_map(|endpoint| {
+                format!("{}:{}", endpoint.target, endpoint.port)
+                    .parse()
+                    .ok()
+                    .map(|authority| {
+                        crate::alt_svc::Alternative::service(
+                            authority,
+                            endpoint.ttl,
+                            endpoint.ech_config_list.is_some(),
+                        )
+                    })
+            })
+            .collect()
+    }
+
     pub(crate) fn network_generation(&mut self, generation: u64) -> bool {
         let mut health = self.health.lock().unwrap();
         if health.generation != generation {

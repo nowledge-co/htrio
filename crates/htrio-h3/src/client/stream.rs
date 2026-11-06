@@ -239,6 +239,14 @@ where
     S: quic::SendStream<B>,
     B: Buf,
 {
+    /// Obtain a handle for control-stream priority updates.
+    pub fn priority_handle(&self) -> crate::priority::Handle {
+        crate::priority::Handle {
+            shared: self.inner.conn_state.clone(),
+            id: self.inner.stream.send_id().into_inner(),
+        }
+    }
+
     /// Observe peer cancellation while an upload source is pending.
     pub fn poll_stopped(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamError>> {
         self.inner

@@ -331,7 +331,7 @@ impl PoolClient {
         *wire.version_mut() = head.version;
         *wire.headers_mut() = head.headers.clone();
         *wire.extensions_mut() = head.extensions.clone();
-        let stream = match self.inner.send_request(wire).await {
+        let stream = match self.inner.send_request_with_recovery(wire).await {
             Ok(stream) => stream,
             Err(error) if error.is_request_not_sent() => {
                 // This error is raised before opening a stream or consuming the
@@ -340,6 +340,10 @@ impl PoolClient {
                 return Err(error.into());
             }
             Err(error) => return Err(error.into()),
+        };
+        let priority = crate::http3::RequestPriority {
+            handle: stream.priority_handle(),
+            connection: self.info.connection.clone(),
         };
         let (send, mut recv) = stream.split();
         let upload = SendGuard {
@@ -383,6 +387,7 @@ impl PoolClient {
             }
         };
         response.extensions_mut().insert(self.info.clone());
+        response.extensions_mut().insert(priority);
         if self.info.tls_info {
             if let Some(identity) = self.info.connection.peer_identity() {
                 if let Ok(chain) =

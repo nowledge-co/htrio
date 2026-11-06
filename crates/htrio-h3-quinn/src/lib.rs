@@ -305,6 +305,10 @@ impl<B> quic::SendStream<B> for BidiStream<B>
 where
     B: Buf,
 {
+    fn set_priority(&mut self, priority: i32) {
+        self.send.set_priority(priority);
+    }
+
     fn poll_stopped(
         &mut self,
         cx: &mut task::Context<'_>,
@@ -451,6 +455,10 @@ impl<B> quic::SendStream<B> for SendStream<B>
 where
     B: Buf,
 {
+    fn set_priority(&mut self, priority: i32) {
+        let _ = self.stream.set_priority(priority);
+    }
+
     fn poll_stopped(
         &mut self,
         cx: &mut task::Context<'_>,

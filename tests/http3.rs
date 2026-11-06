@@ -4,7 +4,6 @@
 mod support;
 
 use http::header::CONTENT_LENGTH;
-use std::error::Error;
 use support::server;
 
 fn assert_send_sync<T: Send + Sync>(_: &T) {}
@@ -314,9 +313,12 @@ async fn http3_test_h3_stop_sending_before_response_no_error_request_body() {
         .expect("missing first response chunk");
     assert_eq!(first, bytes::Bytes::from_static(b"first"));
 
-    request_tx
-        .send(bytes::Bytes::from_static(b"late request chunk"))
+    tokio::time::timeout(std::time::Duration::from_secs(2), request_tx.closed())
+        .await
         .unwrap();
+    assert!(request_tx
+        .send(bytes::Bytes::from_static(b"late request chunk"))
+        .is_err());
     drop(request_tx);
 
     response_tx
@@ -387,46 +389,28 @@ async fn http3_test_h3_stop_sending_before_response_internal_error() {
         .build()
         .expect("client builder");
 
-    let mut res = client
+    let result = client
         .post(&url)
         .version(http::Version::HTTP_3)
         .body(request_body)
         .send()
+        .await;
+    let error = match result {
+        Err(error) => error,
+        Ok(mut response) => response.chunk().await.unwrap_err(),
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), request_tx.closed())
         .await
-        .expect("response");
-
-    assert_eq!(res.version(), http::Version::HTTP_3);
-    assert_eq!(res.status(), htrio::StatusCode::OK);
-
-    response_tx
-        .send(bytes::Bytes::from_static(b"first"))
-        .expect("send first response chunk");
-    let first = res
-        .chunk()
-        .await
-        .ok()
-        .flatten()
-        .expect("missing first response chunk");
-    assert_eq!(first, bytes::Bytes::from_static(b"first"));
-
-    drop(request_tx);
-
-    response_tx
-        .send(bytes::Bytes::from_static(b"second"))
         .unwrap();
+    drop(request_tx);
+    // The stop is observed even when the source has never produced a frame.
+    let _ = response_tx.send(bytes::Bytes::from_static(b"finish"));
     drop(response_tx);
-
-    let err = res.chunk().await.unwrap_err();
-    assert!(err.is_decode());
-    let err = err
-        .source()
-        .unwrap()
-        .source()
-        .unwrap()
-        .downcast_ref::<h3::error::StreamError>()
-        .expect("h3 stream error");
+    let source = support::error::source_chain(&error)
+        .find_map(|source| source.downcast_ref::<h3::error::StreamError>())
+        .expect("typed HTTP/3 stop error");
     assert!(matches!(
-        err,
+        source,
         h3::error::StreamError::RemoteTerminate {
             code: h3::error::Code::H3_INTERNAL_ERROR,
             ..

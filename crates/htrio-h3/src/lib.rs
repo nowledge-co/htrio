@@ -11,6 +11,7 @@ pub mod client;
 mod config;
 //pub mod error;
 pub mod ext;
+pub mod priority;
 pub mod quic;
 
 pub mod server;

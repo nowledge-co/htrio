@@ -172,7 +172,7 @@ mod http3 {
                 && request.version() == Version::HTTP_11
                 && !forced
             {
-                let alternatives = self
+                let mut alternatives = self
                     .cache
                     .candidates(&origin)
                     .into_iter()
@@ -184,6 +184,33 @@ mod http3 {
                         )
                     })
                     .collect::<Vec<_>>();
+                let services = self
+                    .client
+                    .as_ref()
+                    .unwrap()
+                    .discover(&origin, proxy.as_ref())
+                    .await;
+                let requires_ech = services.iter().any(|service| service.requires_ech);
+                if requires_ech {
+                    alternatives.clear();
+                }
+                for service in services {
+                    if (!requires_ech || service.requires_ech)
+                        && !alternatives
+                            .iter()
+                            .any(|alternative| alternative.authority == service.authority)
+                        && !self.client.as_ref().unwrap().is_broken(
+                            &origin,
+                            &service.authority,
+                            proxy.as_ref(),
+                        )
+                    {
+                        alternatives.push(service);
+                    }
+                }
+                if requires_ech && alternatives.is_empty() {
+                    return Err(error::request("all ECH service routes are unavailable"));
+                }
                 if !alternatives.is_empty() {
                     let mut failed = Vec::new();
                     let tcp_prepare = self.tcp_preconnect.clone();
@@ -199,32 +226,43 @@ mod http3 {
                             tcp_prepare.connect(origin.clone()).await
                         };
                         tokio::pin!(h3, tcp_connect);
-                        tokio::select! {
-                            result = &mut h3 => match result {
-                                Ok((connection, alternative)) => Prepared::Http3(connection, alternative),
-                                Err(_) => Prepared::Tcp(tcp_connect.await.map_err(error::request)?),
-                            },
-                            result = &mut tcp_connect => match result {
-                                Ok(connection) => Prepared::Tcp(connection),
-                                Err(tcp_error) => match h3.await {
+                        if requires_ech {
+                            let (connection, alternative) = h3.await.map_err(error::request)?;
+                            Prepared::Http3(connection, alternative)
+                        } else {
+                            tokio::select! {
+                                result = &mut h3 => match result {
                                     Ok((connection, alternative)) => Prepared::Http3(connection, alternative),
-                                    Err(_) => return Err(error::request(tcp_error)),
+                                    Err(_) => Prepared::Tcp(tcp_connect.await.map_err(error::request)?),
                                 },
-                            },
+                                result = &mut tcp_connect => match result {
+                                    Ok(connection) => Prepared::Tcp(connection),
+                                    Err(tcp_error) => match h3.await {
+                                        Ok((connection, alternative)) => Prepared::Http3(connection, alternative),
+                                        Err(_) => return Err(error::request(tcp_error)),
+                                    },
+                                },
+                            }
                         }
                     };
                     match prepared {
                         Prepared::Http3(connection, alternative) => {
-                            let replay = clone_request(&request);
+                            let replay = if alternative.requires_ech {
+                                None
+                            } else {
+                                clone_request(&request)
+                            };
                             *request.version_mut() = Version::HTTP_3;
-                            request.headers_mut().insert(
-                                "alt-used",
-                                alternative
-                                    .authority
-                                    .as_str()
-                                    .parse()
-                                    .expect("valid authority"),
-                            );
+                            if !alternative.from_dns {
+                                request.headers_mut().insert(
+                                    "alt-used",
+                                    alternative
+                                        .authority
+                                        .as_str()
+                                        .parse()
+                                        .expect("valid authority"),
+                                );
+                            }
                             match self
                                 .dispatch(
                                     connection,

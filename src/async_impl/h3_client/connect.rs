@@ -38,6 +38,7 @@ pub(crate) struct H3ClientConfig {
     pub(crate) max_field_section_size: Option<u64>,
     pub(crate) max_frame_size: Option<u64>,
     pub(crate) tls_info: bool,
+    pub(crate) verifier: Option<Arc<dyn rustls::client::danger::ServerCertVerifier>>,
 
     /// Send reserved protocol values to exercise peers' extension handling.
     pub(crate) send_grease: Option<bool>,
@@ -49,6 +50,7 @@ impl Default for H3ClientConfig {
             max_field_section_size: None,
             max_frame_size: None,
             tls_info: false,
+            verifier: None,
             send_grease: None,
         }
     }
@@ -59,8 +61,18 @@ pub(crate) struct H3Connector {
     resolver: DynResolver,
     endpoint: Arc<Mutex<Option<Endpoint>>>,
     quic_config: ClientConfig,
+    tls: Arc<rustls::ClientConfig>,
+    transport: Arc<TransportConfig>,
     client_config: H3ClientConfig,
     local_addr: Option<IpAddr>,
+    services: Arc<
+        Mutex<
+            std::collections::HashMap<
+                String,
+                (std::time::Instant, Vec<crate::dns::ServiceEndpoint>),
+            >,
+        >,
+    >,
 }
 
 impl H3Connector {
@@ -71,17 +83,135 @@ impl H3Connector {
         transport_config: TransportConfig,
         client_config: H3ClientConfig,
     ) -> Result<H3Connector, BoxError> {
-        let quic_client_config = Arc::new(QuicClientConfig::try_from(tls)?);
+        let tls = Arc::new(tls);
+        let quic_client_config = Arc::new(QuicClientConfig::try_from(tls.clone())?);
+        let transport = Arc::new(transport_config);
         let mut config = ClientConfig::new(quic_client_config);
-        config.transport_config(Arc::new(transport_config));
+        config.transport_config(transport.clone());
 
         Ok(Self {
             resolver,
             endpoint: Arc::new(Mutex::new(None)),
             quic_config: config,
+            tls,
+            transport,
             client_config,
             local_addr,
+            services: Default::default(),
         })
+    }
+
+    fn origin_key(origin: &Uri) -> String {
+        format!(
+            "{}:{}",
+            origin.host().unwrap_or(""),
+            origin.port_u16().unwrap_or(443)
+        )
+    }
+
+    pub(crate) async fn discover(
+        &self,
+        origin: &Uri,
+    ) -> Result<Vec<crate::dns::ServiceEndpoint>, BoxError> {
+        let key = Self::origin_key(origin);
+        if let Some((_, endpoints)) = self
+            .services
+            .lock()
+            .unwrap()
+            .get(&key)
+            .filter(|(expiry, _)| *expiry > std::time::Instant::now())
+        {
+            return Ok(endpoints.clone());
+        }
+        let host = origin.host().ok_or("HTTPS origin has no host")?;
+        if host.parse::<IpAddr>().is_ok() || host.starts_with('[') {
+            return Ok(Vec::new());
+        }
+        let mut endpoints = self
+            .resolver
+            .resolve_service(host, origin.port_u16().unwrap_or(443))
+            .await?;
+        endpoints.truncate(8);
+        endpoints.retain(|endpoint| {
+            endpoint.priority != 0
+                && endpoint.port != 0
+                && !endpoint.ttl.is_zero()
+                && endpoint.alpn.iter().any(|alpn| alpn == b"h3")
+                && endpoint
+                    .ech_config_list
+                    .as_ref()
+                    .is_none_or(|ech| ech.len() <= 16 * 1024)
+                && format!("{}:{}", endpoint.target, endpoint.port)
+                    .parse::<http::uri::Authority>()
+                    .is_ok()
+        });
+        endpoints.sort_by_key(|endpoint| endpoint.priority);
+        let ttl = endpoints
+            .iter()
+            .map(|endpoint| endpoint.ttl)
+            .min()
+            .unwrap_or(Duration::from_secs(60))
+            .min(Duration::from_secs(86_400));
+        let mut cache = self.services.lock().unwrap();
+        cache.retain(|_, (expiry, _)| *expiry > std::time::Instant::now());
+        if cache.len() >= 256 {
+            if let Some(oldest) = cache.keys().next().cloned() {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(key, (std::time::Instant::now() + ttl, endpoints.clone()));
+        Ok(endpoints)
+    }
+
+    fn service(
+        &self,
+        origin: &Uri,
+        alternative: &http::uri::Authority,
+    ) -> Option<crate::dns::ServiceEndpoint> {
+        self.services
+            .lock()
+            .unwrap()
+            .get(&Self::origin_key(origin))
+            .filter(|(expiry, _)| *expiry > std::time::Instant::now())?
+            .1
+            .iter()
+            .find(|endpoint| {
+                endpoint.target.eq_ignore_ascii_case(alternative.host())
+                    && endpoint.port == alternative.port_u16().unwrap_or(443)
+            })
+            .cloned()
+    }
+
+    fn route_config(
+        &self,
+        service: Option<&crate::dns::ServiceEndpoint>,
+    ) -> Result<ClientConfig, BoxError> {
+        let Some(ech) = service.and_then(|service| service.ech_config_list.as_ref()) else {
+            return Ok(self.quic_config.clone());
+        };
+        let verifier = self
+            .client_config
+            .verifier
+            .clone()
+            .ok_or("DNS ECH requires the certificate verifier used by the TLS configuration")?;
+        let ech = rustls::client::EchConfig::new(
+            rustls::pki_types::EchConfigListBytes::from(ech.as_slice()),
+            rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES,
+        )?;
+        let mut tls =
+            rustls::ClientConfig::builder_with_provider(self.tls.crypto_provider().clone())
+                .with_ech(ech.into())?
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_client_cert_resolver(self.tls.client_auth_cert_resolver.clone());
+        tls.alpn_protocols = vec![b"h3".to_vec()];
+        tls.resumption = self.tls.resumption.clone();
+        tls.key_log = self.tls.key_log.clone();
+        tls.enable_early_data = self.tls.enable_early_data;
+        tls.max_fragment_size = self.tls.max_fragment_size;
+        let mut config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls)?));
+        config.transport_config(self.transport.clone());
+        Ok(config)
     }
 
     pub async fn connect(
@@ -99,10 +229,18 @@ impl H3Connector {
             .host()
             .trim_start_matches('[')
             .trim_end_matches(']');
+        let service = self.service(&origin, &alternative);
+        let quic_config = self.route_config(service.as_ref())?;
         if let Some(proxy) = proxy {
             #[cfg(feature = "socks")]
             return self
-                .connect_socks(proxy, host, alternative.port_u16(), server_name)
+                .connect_socks(
+                    proxy,
+                    host,
+                    alternative.port_u16(),
+                    server_name,
+                    quic_config,
+                )
                 .await;
             #[cfg(not(feature = "socks"))]
             {
@@ -110,10 +248,25 @@ impl H3Connector {
                 return Err("HTTP/3 SOCKS5 proxying requires the socks Cargo feature".into());
             }
         }
-        let addrs = resolve_host(&mut self.resolver, host, alternative.port_u16(), 443).await?;
+        let addrs = match resolve_host(&mut self.resolver, host, alternative.port_u16(), 443).await
+        {
+            Ok(addresses) if !addresses.is_empty() => addresses,
+            result => match service {
+                Some(service) if !service.addresses.is_empty() => service
+                    .addresses
+                    .into_iter()
+                    .take(16)
+                    .map(|mut address| {
+                        address.set_port(service.port);
+                        address
+                    })
+                    .collect(),
+                _ => result?,
+            },
+        };
 
         // The destination comes from Alt-Svc; TLS still authenticates the origin.
-        self.remote_connect(addrs, server_name).await
+        self.remote_connect(addrs, server_name, quic_config).await
     }
 
     pub(crate) fn tls_info(&self) -> bool {
@@ -124,6 +277,7 @@ impl H3Connector {
         // Existing streams retain their endpoint and tunnel. Future connections
         // bind on the new network without migrating a SOCKS association.
         self.endpoint.lock().unwrap().take();
+        self.services.lock().unwrap().clear();
     }
 
     fn endpoint(&self) -> Result<Endpoint, BoxError> {
@@ -168,6 +322,7 @@ impl H3Connector {
         host: &str,
         port: Option<u16>,
         server_name: &str,
+        quic_config: ClientConfig,
     ) -> Result<H3Connection, BoxError> {
         use super::socks::Target;
         let targets =
@@ -184,11 +339,12 @@ impl H3Connector {
         for (index, target) in targets.into_iter().take(16).enumerate() {
             let connector = self.clone();
             let proxy = proxy.clone();
+            let quic_config = quic_config.clone();
             let server_name = server_name.to_owned();
             attempts.spawn(async move {
                 tokio::time::sleep(HAPPY_EYEBALLS_DELAY * index as u32).await;
                 connector
-                    .connect_socks_target(&proxy, target, &server_name)
+                    .connect_socks_target(&proxy, target, &server_name, quic_config)
                     .await
             });
         }
@@ -209,6 +365,7 @@ impl H3Connector {
         proxy: &crate::proxy::Intercepted,
         target: super::socks::Target,
         server_name: &str,
+        quic_config: ClientConfig,
     ) -> Result<H3Connection, BoxError> {
         let (socket, peer) = super::socks::SocksSocket::connect(
             proxy,
@@ -223,7 +380,7 @@ impl H3Connector {
             socket.clone(),
             Arc::new(quinn::TokioRuntime),
         )?;
-        endpoint.set_default_client_config(self.quic_config.clone());
+        endpoint.set_default_client_config(quic_config);
         let connection = tokio::select! {
             result = endpoint.connect(peer, server_name)? => result?,
             _ = socket.closed() => return Err("SOCKS5 UDP association closed during handshake".into()),
@@ -247,6 +404,7 @@ impl H3Connector {
         &mut self,
         addrs: Vec<SocketAddr>,
         server_name: &str,
+        quic_config: ClientConfig,
     ) -> Result<H3Connection, BoxError> {
         let endpoint = self.endpoint()?;
         let mut ipv6 = addrs.iter().copied().filter(|addr| addr.is_ipv6());
@@ -277,10 +435,13 @@ impl H3Connector {
         {
             let endpoint = endpoint.clone();
             let config = self.client_config.clone();
+            let quic_config = quic_config.clone();
             let server_name = server_name.to_owned();
             attempts.spawn(async move {
                 tokio::time::sleep(HAPPY_EYEBALLS_DELAY * index as u32).await;
-                let connection = endpoint.connect(address, &server_name)?.await?;
+                let connection = endpoint
+                    .connect_with(quic_config, address, &server_name)?
+                    .await?;
                 Self::build_h3(&endpoint, connection, &config).await
             });
         }

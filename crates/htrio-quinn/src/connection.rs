@@ -602,6 +602,20 @@ impl Connection {
         self.0.stable_id()
     }
 
+    /// Update scheduling for an existing send stream without owning its writer.
+    pub fn set_stream_priority(
+        &self,
+        stream: StreamId,
+        priority: i32,
+    ) -> Result<(), crate::ClosedStream> {
+        self.0
+            .state
+            .lock("set_stream_priority")
+            .inner
+            .send_stream(stream)
+            .set_priority(priority)
+    }
+
     /// Update traffic keys spontaneously
     ///
     /// This primarily exists for testing purposes.

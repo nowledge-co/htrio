@@ -36,6 +36,15 @@ pub trait Resolve: Send + Sync {
     /// Explicitly specified port in the URL will override any port in the resolved `SocketAddr`s.
     /// Otherwise, port `0` will be replaced by the conventional port for the given scheme (e.g. 80 for http).
     fn resolve(&self, name: Name) -> Resolving;
+
+    /// Resolve HTTPS/SVCB service metadata for an HTTPS origin.
+    ///
+    /// The default preserves existing address-only resolvers. Return resolved
+    /// ServiceMode records in priority order; address overrides still apply to
+    /// target lookups. Remote-DNS SOCKS routes do not call this method.
+    fn resolve_service(&self, _name: Name, _port: u16) -> super::ServiceResolving {
+        Box::pin(std::future::ready(Ok(Vec::new())))
+    }
 }
 
 /// A name that must be resolved to addresses.
@@ -80,6 +89,15 @@ impl DynResolver {
     #[cfg(feature = "socks")]
     pub(crate) fn gai() -> Self {
         Self::new(Arc::new(super::gai::GaiResolver::new()))
+    }
+
+    #[cfg(feature = "http3")]
+    pub(crate) async fn resolve_service(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Vec<super::ServiceEndpoint>, BoxError> {
+        self.resolver.resolve_service(host.parse()?, port).await
     }
 
     /// Resolve an HTTP host and port, not just a domain name.
@@ -153,6 +171,19 @@ impl Resolve for DnsResolverWithOverrides {
             }
             None => self.dns_resolver.resolve(name),
         }
+    }
+    fn resolve_service(&self, name: Name, port: u16) -> super::ServiceResolving {
+        let future = self.dns_resolver.resolve_service(name, port);
+        let overrides = self.overrides.clone();
+        Box::pin(async move {
+            let mut endpoints = future.await?;
+            for endpoint in &mut endpoints {
+                if overrides.contains_key(endpoint.target.trim_end_matches('.')) {
+                    endpoint.addresses.clear();
+                }
+            }
+            Ok(endpoints)
+        })
     }
 }
 

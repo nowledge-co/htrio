@@ -45,6 +45,7 @@ impl fmt::Display for FrameError {
 }
 
 pub enum Frame<B> {
+    Raw(Bytes),
     Data(B),
     Headers(Bytes),
     CancelPush(PushId),
@@ -154,6 +155,7 @@ where
 {
     fn encode<T: BufMut>(&self, buf: &mut T) {
         match self {
+            Frame::Raw(_) => {}
             Frame::Data(b) => {
                 FrameType::DATA.encode(buf);
                 buf.write_var(b.remaining() as u64);
@@ -188,7 +190,7 @@ where
     pub fn payload(&self) -> Option<&dyn Buf> {
         match self {
             Frame::Data(f) => Some(f),
-            Frame::Headers(f) => Some(f),
+            Frame::Headers(f) | Frame::Raw(f) => Some(f),
             Frame::PushPromise(f) => Some(&f.encoded),
             _ => None,
         }
@@ -197,7 +199,7 @@ where
     pub fn payload_mut(&mut self) -> Option<&mut dyn Buf> {
         match self {
             Frame::Data(f) => Some(f),
-            Frame::Headers(f) => Some(f),
+            Frame::Headers(f) | Frame::Raw(f) => Some(f),
             Frame::PushPromise(f) => Some(&mut f.encoded),
             _ => None,
         }
@@ -217,7 +219,7 @@ where
                     b.advance(pos)
                 }
             }
-            Frame::Headers(b) => buf.put_slice(b),
+            Frame::Headers(b) | Frame::Raw(b) => buf.put_slice(b),
             _ => (),
         }
     }
@@ -226,6 +228,7 @@ where
 impl fmt::Debug for Frame<PayloadLen> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Frame::Raw(bytes) => write!(f, "Raw({} bytes)", bytes.len()),
             Frame::Data(len) => write!(f, "Data: {} bytes", len.0),
             Frame::Headers(frame) => write!(f, "Headers({} entries)", frame.len()),
             Frame::Settings(_) => write!(f, "Settings"),
@@ -245,6 +248,7 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Frame::Raw(bytes) => write!(f, "Raw({} bytes)", bytes.len()),
             Frame::Data(data) => write!(f, "Data: {} bytes", data.remaining()),
             Frame::Headers(frame) => write!(f, "Headers({} entries)", frame.len()),
             Frame::Settings(_) => write!(f, "Settings"),
@@ -265,6 +269,7 @@ where
 impl<T, U> PartialEq<Frame<T>> for Frame<U> {
     fn eq(&self, other: &Frame<T>) -> bool {
         match self {
+            Frame::Raw(x) => matches!(other, Frame::Raw(y) if x == y),
             Frame::Data(_) => matches!(other, Frame::Data(_)),
             Frame::Settings(x) => matches!(other, Frame::Settings(y) if x == y),
             Frame::Headers(x) => matches!(other, Frame::Headers(y) if x == y),

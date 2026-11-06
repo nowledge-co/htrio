@@ -159,6 +159,19 @@ where
         &mut self,
         req: http::Request<()>,
     ) -> Result<RequestStream<T::BidiStream, B>, StreamError> {
+        self.send_request_with_recovery(req)
+            .await
+            .map_err(|error| match error {
+                StreamError::RequestNotSent { source } => *source,
+                error => error,
+            })
+    }
+
+    /// Send a request, retaining typed proof when failure precedes dispatch.
+    pub async fn send_request_with_recovery(
+        &mut self,
+        req: http::Request<()>,
+    ) -> Result<RequestStream<T::BidiStream, B>, StreamError> {
         if let Some(error) = self.check_peer_connection_closing() {
             return Err(error.request_not_sent());
         };
@@ -171,6 +184,7 @@ where
             extensions,
             ..
         } = parts;
+        let priority = extensions.get::<crate::priority::Priority>().copied();
         let headers = Header::request(method, uri, headers, extensions).map_err(|_e| {
             self.handle_connection_error_on_stream(InternalConnectionError {
                 code: Code::H3_INTERNAL_ERROR,
@@ -204,6 +218,10 @@ where
         //# To allow for better compression efficiency, the Cookie header field
         //# ([COOKIES]) MAY be split into separate field lines, each with one or
         //# more cookie-pairs, before compression.
+
+        if let Some(priority) = priority {
+            stream.set_priority(priority.quic_priority());
+        }
 
         let mut block = BytesMut::new();
         let mem_size = qpack::encode_stateless(&mut block, headers).map_err(|_e| {
@@ -416,6 +434,10 @@ where
     /// Maintain the connection state until it is closed
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     pub fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<ConnectionError> {
+        self.inner.shared.waker().register(cx.waker());
+        if let Poll::Ready(Err(error)) = self.inner.poll_priority_updates(cx) {
+            return Poll::Ready(error);
+        }
         while let Poll::Ready(result) = self.inner.poll_control(cx) {
             match result {
                 //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2

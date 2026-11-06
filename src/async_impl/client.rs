@@ -526,6 +526,7 @@ impl ClientBuilder {
                  quic_max_idle_timeout: Option<Duration>,
                  quic_transport_config: Option<TransportConfig>,
                  tls_info,
+                 verifier,
                  quic_stream_receive_window,
                  quic_receive_window,
                  quic_send_window,
@@ -562,6 +563,7 @@ impl ClientBuilder {
 
                     let mut h3_client_config = H3ClientConfig::default();
                     h3_client_config.tls_info = tls_info;
+                    h3_client_config.verifier = verifier;
 
                     if let Some(max_field_section_size) = h3_max_field_section_size {
                         h3_client_config.max_field_section_size = Some(max_field_section_size);
@@ -732,6 +734,7 @@ impl ClientBuilder {
                             config.quic_max_idle_timeout,
                             config.quic_transport_config,
                             config.tls_info,
+                            None,
                             config.quic_stream_receive_window,
                             config.quic_receive_window,
                             config.quic_send_window,
@@ -811,35 +814,25 @@ impl ClientBuilder {
                             .with_protocol_versions(&versions)
                             .map_err(|_| crate::error::builder("invalid TLS versions"))?;
 
-                    let config_builder = if !config.certs_verification {
-                        config_builder
-                            .dangerous()
-                            .with_custom_certificate_verifier(Arc::new(NoVerifier))
+                    let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = if !config
+                        .certs_verification
+                    {
+                        Arc::new(NoVerifier)
                     } else if !config.hostname_verification {
                         if !config.tls_certs_only {
-                            // Should this just warn? Error for now...
-                            return Err(crate::error::builder(
-                                    "disabling rustls hostname verification only allowed with tls_certs_only()"
-                            ));
+                            return Err(error::builder("disabling rustls hostname verification only allowed with tls_certs_only()"));
                         }
-
-                        config_builder
-                            .dangerous()
-                            .with_custom_certificate_verifier(Arc::new(IgnoreHostname::new(
-                                crate::tls::rustls_store(config.root_certs)?,
-                                signature_algorithms,
-                            )))
+                        Arc::new(IgnoreHostname::new(
+                            crate::tls::rustls_store(config.root_certs)?,
+                            signature_algorithms,
+                        ))
                     } else if !config.tls_certs_only {
-                        // Check for some misconfigurations and report them.
                         if !config.crls.is_empty() {
-                            return Err(crate::error::builder(
-                                "CRLs only allowed with tls_certs_only()",
-                            ));
+                            return Err(error::builder("CRLs only allowed with tls_certs_only()"));
                         }
-
                         let verifier = if config.root_certs.is_empty() {
                             rustls_platform_verifier::Verifier::new(provider.clone())
-                                .map_err(crate::error::builder)?
+                                .map_err(error::builder)?
                         } else {
                             #[cfg(any(
                                 all(unix, not(target_os = "android")),
@@ -850,45 +843,40 @@ impl ClientBuilder {
                                     crate::tls::rustls_der(config.root_certs)?,
                                     provider.clone(),
                                 )
-                                .map_err(crate::error::builder)?
+                                .map_err(error::builder)?
                             }
-
                             #[cfg(not(any(
                                 all(unix, not(target_os = "android")),
                                 target_os = "windows"
                             )))]
-                            return Err(crate::error::builder(
+                            return Err(error::builder(
                                 "rustls-platform-verifier could not load extra certs",
                             ));
                         };
-
-                        config_builder
-                            .dangerous()
-                            .with_custom_certificate_verifier(Arc::new(verifier))
+                        Arc::new(verifier)
                     } else {
+                        let store = Arc::new(crate::tls::rustls_store(config.root_certs)?);
+                        let builder = rustls::client::WebPkiServerVerifier::builder_with_provider(
+                            store, provider,
+                        );
                         if config.crls.is_empty() {
-                            config_builder.with_root_certificates(crate::tls::rustls_store(
-                                config.root_certs,
-                            )?)
+                            builder.build().map_err(error::builder)?
                         } else {
-                            let crls = config
-                                .crls
-                                .iter()
-                                .map(|e| e.as_rustls_crl())
-                                .collect::<Vec<_>>();
-                            let verifier =
-                                rustls::client::WebPkiServerVerifier::builder_with_provider(
-                                    Arc::new(crate::tls::rustls_store(config.root_certs)?),
-                                    provider,
+                            builder
+                                .with_crls(
+                                    config
+                                        .crls
+                                        .iter()
+                                        .map(|crl| crl.as_rustls_crl())
+                                        .collect::<Vec<_>>(),
                                 )
-                                .with_crls(crls)
                                 .build()
-                                .map_err(|_| {
-                                    crate::error::builder("invalid TLS verification settings")
-                                })?;
-                            config_builder.with_webpki_verifier(verifier)
+                                .map_err(error::builder)?
                         }
                     };
+                    let config_builder = config_builder
+                        .dangerous()
+                        .with_custom_certificate_verifier(verifier.clone());
 
                     // Finalize TLS config
                     let mut tls = if let Some(id) = config.identity {
@@ -939,6 +927,7 @@ impl ClientBuilder {
                             config.quic_max_idle_timeout,
                             config.quic_transport_config,
                             config.tls_info,
+                            Some(verifier),
                             config.quic_stream_receive_window,
                             config.quic_receive_window,
                             config.quic_send_window,

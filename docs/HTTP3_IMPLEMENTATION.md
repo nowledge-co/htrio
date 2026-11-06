@@ -75,3 +75,13 @@ defaults. Full Mem application integration is a separate qualification.
   rotation, bounded address racing, proxy-scoped route health, network generation
   invalidation, direct endpoint rebinding, preconnect/keepalive, cache snapshots,
   and connection statistics. Qualification remains pending until its exact CI.
+
+- `e58d72f`: MSRV, optional qlog/feature profiles, and owned Quinn CI passed.
+  Existing h3 callers expected their original error variants; the recovery-aware
+  entry point is now separate. STOP_SENDING regressions now assert immediate
+  source cancellation rather than delivering a late source frame. Full native
+  semantic qualification continues on the next commit.
+- Add request priority headers/control updates/QUIC scheduling and compatible
+  HTTPS service metadata. Hickory alias resolution and ECH route rebuilding are
+  bounded; ECH routes do not downgrade to clear-SNI TCP. Dynamic QPACK, 0-RTT,
+  and authenticated coalescing remain in progress.

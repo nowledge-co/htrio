@@ -115,8 +115,10 @@ HTTP/3 requires rustls with TLS 1.3 and never falls back to TCP. No custom
 `RUSTFLAGS` are needed. `.alt_svc(false)` disables discovery while retaining
 explicit HTTP/3 support.
 
-Discovery uses response headers. HTTP/2 ALTSVC frames and HTTPS DNS records are
-not yet implemented. `AltSvcCache::snapshot()` and `restore()` allow trusted,
+Discovery uses response headers and the optional `dns::Resolve::resolve_service`
+metadata method. Hickory DNS also queries HTTPS records, follows bounded alias
+chains, and recognizes ALPN, ports, address hints, mandatory keys, and ECH.
+HTTP/2 ALTSVC frames are not yet implemented. `AltSvcCache::snapshot()` and `restore()` allow trusted,
 application-controlled persistence; htrio never writes cache files itself.
 
 HTTP/3 preserves informational responses and trailers, checks message lengths,
@@ -130,6 +132,15 @@ loss/congestion/MTU statistics, and pool availability. `remote_addr()` reports
 direct peers; SOCKS virtual addresses stay private. `tls_info(true)` includes the
 peer certificate. `http3_transport_config()` accepts native QUIC settings,
 including application-owned qlog streams with the `http3-qlog` feature.
+
+`RequestBuilder::priority()` sends RFC 9218 urgency and incremental hints and
+maps urgency to QUIC scheduling. The response's `http3::RequestPriority` extension
+can enqueue bounded, coalesced PRIORITY_UPDATE messages.
+
+DNS ECH configurations are applied to origin-authenticated QUIC handshakes.
+ECH-selected routes fail closed instead of racing a TCP connection with clear
+SNI. Preconfigured rustls backends currently need an equivalent verifier before
+ECH configurations can be rebuilt; normal htrio TLS configurations retain it.
 
 ## SOCKS5 UDP and DNS
 

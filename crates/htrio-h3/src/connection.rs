@@ -659,6 +659,37 @@ where
         Poll::Ready(Ok(res))
     }
 
+    fn handle_critical_stream_error(&mut self, error: StreamErrorIncoming) -> ConnectionError {
+        match error {
+            StreamErrorIncoming::ConnectionErrorIncoming { connection_error } => {
+                self.handle_connection_error(connection_error)
+            }
+            error => self.handle_connection_error(InternalConnectionError::new(
+                Code::H3_CLOSED_CRITICAL_STREAM,
+                format!("critical send stream failed: {error:?}"),
+            )),
+        }
+    }
+
+    pub(crate) fn poll_priority_updates(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ConnectionError>> {
+        for _ in 0..64 {
+            ready!(self.control_send.poll_ready(cx))
+                .map_err(|error| self.handle_critical_stream_error(error))?;
+            let next = self.shared.priorities.lock().unwrap().pop_first();
+            let Some((id, priority)) = next else {
+                return Poll::Ready(Ok(()));
+            };
+            self.control_send
+                .send_data(Frame::Raw(crate::priority::encode(id, priority)))
+                .map_err(|error| self.handle_critical_stream_error(error))?;
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     pub(crate) fn process_goaway<T>(
         &mut self,

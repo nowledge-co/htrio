@@ -398,6 +398,24 @@ impl RequestBuilder {
         self
     }
 
+    /// Set HTTP urgency and map it to the HTTP/3 send scheduler.
+    ///
+    /// The Priority header is also sent when this hop uses HTTP/1 or HTTP/2.
+    #[cfg(feature = "http3")]
+    pub fn priority(mut self, priority: crate::http3::Priority) -> RequestBuilder {
+        if let Ok(request) = self.request.as_mut() {
+            request.headers_mut().insert(
+                "priority",
+                priority
+                    .field_value()
+                    .parse()
+                    .expect("valid Priority field"),
+            );
+            request.extensions_mut().insert(priority);
+        }
+        self
+    }
+
     /// Send a form body.
     ///
     /// Sets the body to the url encoded serialization of the passed value,

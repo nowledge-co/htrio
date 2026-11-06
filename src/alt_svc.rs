@@ -46,6 +46,8 @@ struct Entry {
 #[derive(Clone, Debug)]
 pub(crate) struct Alternative {
     pub(crate) authority: Authority,
+    pub(crate) from_dns: bool,
+    pub(crate) requires_ech: bool,
     expires: Instant,
     persist: bool,
     broken_until: Option<Instant>,
@@ -66,6 +68,19 @@ pub struct Record {
     pub expires_at: SystemTime,
     /// Whether the alternative survives network changes.
     pub persist: bool,
+}
+
+impl Alternative {
+    pub(crate) fn service(authority: Authority, ttl: Duration, requires_ech: bool) -> Self {
+        Self {
+            authority,
+            from_dns: true,
+            requires_ech,
+            expires: Instant::now() + ttl.min(Duration::from_secs(86_400)),
+            persist: false,
+            broken_until: None,
+        }
+    }
 }
 
 impl Default for AltSvcCache {
@@ -462,6 +477,8 @@ fn parse_alternative(origin: &Uri, item: &str, age: Duration, now: Instant) -> O
     }
     Some(Alternative {
         authority,
+        from_dns: false,
+        requires_ech: false,
         expires: now.checked_add(remaining)?,
         persist: persist.unwrap_or(false),
         broken_until: None,

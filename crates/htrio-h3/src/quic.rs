@@ -169,6 +169,9 @@ pub trait OpenStreams<B: Buf> {
 
 /// A trait describing the "send" actions of a QUIC stream.
 pub trait SendStream<B: Buf> {
+    /// Set the transport scheduler priority; adapters may ignore this hint.
+    fn set_priority(&mut self, _priority: i32) {}
+
     /// Poll peer cancellation even when the application has no bytes to write.
     /// Adapters without cancellation notifications may retain the default.
     fn poll_stopped(
