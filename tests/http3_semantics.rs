@@ -434,6 +434,51 @@ async fn preconnect_rebind_and_network_change_preserve_protocol_boundaries() {
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
+#[test]
+fn resolver_cache_invalidation_can_inspect_client_statistics() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Resolver {
+        client: std::sync::Weak<Mutex<Option<htrio::Client>>>,
+        calls: Arc<AtomicUsize>,
+    }
+    impl htrio::dns::Resolve for Resolver {
+        fn resolve(&self, _: htrio::dns::Name) -> htrio::dns::Resolving {
+            unreachable!("this regression does not send requests")
+        }
+        fn clear_cache(&self) {
+            self.client
+                .upgrade()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .http3_pool_stats();
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let holder = Arc::new(Mutex::new(None));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = htrio::Client::builder()
+        .no_proxy()
+        .dns_resolver(Arc::new(Resolver {
+            client: Arc::downgrade(&holder),
+            calls: calls.clone(),
+        }))
+        .build()
+        .unwrap();
+    *holder.lock().unwrap() = Some(client.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        client.network_changed();
+        tx.send(()).unwrap();
+    });
+    rx.recv_timeout(Duration::from_secs(2))
+        .expect("resolver hook must not deadlock on route health");
+    thread.join().unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn resolved_addresses_race_past_a_silent_first_candidate() {
     let server = Server::new(|_, mut stream| async move {
@@ -491,6 +536,7 @@ async fn priority_headers_and_live_updates_keep_the_response_stream_usable() {
 struct ServiceResolver {
     address: std::net::SocketAddr,
     ech: bool,
+    ttl: Duration,
 }
 impl htrio::dns::Resolve for ServiceResolver {
     fn resolve(&self, _: htrio::dns::Name) -> htrio::dns::Resolving {
@@ -500,6 +546,7 @@ impl htrio::dns::Resolve for ServiceResolver {
     fn resolve_service(&self, name: htrio::dns::Name, _: u16) -> htrio::dns::ServiceResolving {
         assert_eq!(name.as_str(), "origin.test");
         let mut endpoint = htrio::dns::ServiceEndpoint::http3("service.test", self.address.port());
+        endpoint.ttl = self.ttl;
         if self.ech {
             endpoint.ech_config_list = Some(vec![0, 0]);
         }
@@ -523,6 +570,7 @@ async fn custom_https_metadata_selects_h3_without_alt_svc_and_keeps_origin_ident
         .dns_resolver(Arc::new(ServiceResolver {
             address: server.address,
             ech: false,
+            ttl: Duration::from_secs(60),
         }))
         .timeout(Duration::from_secs(5))
         .build()
@@ -544,12 +592,45 @@ async fn invalid_dns_ech_never_falls_back_to_a_plaintext_sni_connection() {
         .dns_resolver(Arc::new(ServiceResolver {
             address: server.address,
             ech: true,
+            ttl: Duration::from_secs(60),
         }))
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
     let error = client.get("https://origin.test/").send().await.unwrap_err();
     assert!(format!("{error:?}").contains("EncryptedClientHello"));
+    assert_eq!(
+        server.connections.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[tokio::test]
+async fn expired_ech_metadata_cannot_downgrade_an_already_selected_route() {
+    let server = Server::new(|_, mut stream| async move {
+        stream.send_response(Response::new(())).await.unwrap();
+        stream.finish().await.unwrap();
+    })
+    .await;
+    for forced in [false, true] {
+        let mut builder = htrio::Client::builder()
+            .no_proxy()
+            .tls_certs_only([htrio::Certificate::from_der(server.certificate.as_ref()).unwrap()])
+            .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+            .dns_resolver(Arc::new(ServiceResolver {
+                address: server.address,
+                ech: true,
+                ttl: Duration::from_nanos(1),
+            }))
+            .timeout(Duration::from_secs(5));
+        if forced {
+            builder = builder.http3_prior_knowledge();
+        }
+        let client = builder.build().unwrap();
+        let error = client.get("https://origin.test/").send().await.unwrap_err();
+        assert!(format!("{error:?}").contains("ECH route no longer has usable service metadata"));
+        assert!(client.preconnect("https://origin.test/").await.is_err());
+    }
     assert_eq!(
         server.connections.load(std::sync::atomic::Ordering::SeqCst),
         0

@@ -20,7 +20,7 @@ use crate::error::{BoxError, Error, Kind};
 use crate::Body;
 use bytes::Buf;
 use h3::client::SendRequest;
-use h3_quinn::{Connection, OpenStreams};
+use h3_quinn::OpenStreams;
 use http::uri::{Authority, Scheme};
 use http::{Request, Response, Uri};
 use log::trace;
@@ -255,15 +255,19 @@ impl Pool {
     pub fn new_connection(
         &mut self,
         lock: ConnectingLock,
-        mut driver: h3::client::Connection<Connection, Bytes>,
-        tx: SendRequest<OpenStreams, Bytes>,
-        endpoint: quinn::Endpoint,
-        connection: quinn::Connection,
+        established: super::connect::H3Connection,
         direct: bool,
         connect_time: Duration,
         tls_info: bool,
-        early: super::session::EarlyData,
     ) -> PoolClient {
+        let super::connect::H3Connection {
+            mut driver,
+            sender: tx,
+            endpoint,
+            connection,
+            early,
+            ech,
+        } = established;
         let (close_tx, close_rx) = std::sync::mpsc::channel();
         let mut confirmation = early.clone();
         let transport = connection.clone();
@@ -299,6 +303,7 @@ impl Pool {
             connect_time,
             tls_info,
             early,
+            ech,
             key.clone(),
         );
         if generation != inner.generation {
@@ -370,6 +375,13 @@ pub struct PoolClient {
 }
 
 impl PoolClient {
+    pub(crate) fn route(&self) -> super::Route {
+        super::Route {
+            authority: self.key.2.clone(),
+            requires_ech: self.info.uses_ech(),
+        }
+    }
+
     fn new(
         tx: SendRequest<OpenStreams, Bytes>,
         connection: quinn::Connection,
@@ -377,6 +389,7 @@ impl PoolClient {
         connect_time: Duration,
         tls_info: bool,
         early: super::session::EarlyData,
+        ech: bool,
         key: Key,
     ) -> Self {
         let info = crate::http3::ConnectionInfo {
@@ -390,6 +403,7 @@ impl PoolClient {
             early_data_used: false,
             dispatched: Default::default(),
             reused: false,
+            ech,
         };
         Self {
             inner: tx,

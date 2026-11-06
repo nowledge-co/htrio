@@ -125,7 +125,7 @@ follows bounded alias chains, and recognizes ALPN, ports, address hints,
 mandatory keys, and ECH. `AltSvcCache::snapshot()` and `restore()` allow trusted,
 application-controlled persistence; htrio never writes cache files itself.
 
-HTTP/3 preserves informational responses and trailers, checks message lengths,
+HTTP/3 handles informational responses, preserves trailers, checks message lengths,
 and bounds encoded/control frames and decoded header sections. Dropping a
 request or response cancels pending upload source reads. `preconnect()` opens
 connections without an HTTP request; `http3_keep_alive_interval()` controls
@@ -170,7 +170,8 @@ retain the application's policy. Session counters contain no ticket contents.
 `http3_coalescing(true)` permits cross-origin reuse only within the same client,
 proxy credentials, network generation, and alternative endpoint. The certificate
 is verified again for the new origin. Client-certificate and ECH routes remain
-isolated. A 421 disables coalescing for the rejected route.
+isolated for the lifetime of the connection, including after DNS metadata expires.
+A 421 disables coalescing for the rejected route.
 
 ## SOCKS5 UDP and DNS
 

@@ -92,9 +92,9 @@ use super::stream::RequestStream;
 /// // Prepare the trailers
 /// let mut trailers = HeaderMap::new();
 /// trailers.insert("trailer", "value".parse()?);
-/// // Send them and finish the send stream
+/// // Send the trailers, then close the send stream.
 /// req_stream.send_trailers(trailers).await?;
-/// // We don't need to finish the send stream, as `send_trailers()` did it for us
+/// req_stream.finish().await?;
 ///
 /// // Receive the response.
 /// let response = req_stream.recv_response().await?;

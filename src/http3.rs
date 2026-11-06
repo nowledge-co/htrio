@@ -26,6 +26,8 @@ pub struct ConnectionInfo {
     pub(crate) early_data_used: bool,
     pub(crate) dispatched: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) reused: bool,
+    // Retain handshake privacy independently of the service record's lifetime.
+    pub(crate) ech: bool,
 }
 
 impl ConnectionInfo {
@@ -49,6 +51,11 @@ impl ConnectionInfo {
     /// Whether this route reuses a connection authenticated for another origin.
     pub fn is_coalesced(&self) -> bool {
         self.coalesced
+    }
+    /// Whether this connection's handshake required encrypted ClientHello.
+    /// Retained after DNS service records expire; such connections stay isolated.
+    pub fn uses_ech(&self) -> bool {
+        self.ech
     }
     /// Current round-trip-time estimate.
     pub fn rtt(&self) -> Duration {

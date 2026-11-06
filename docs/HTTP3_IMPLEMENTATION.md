@@ -50,12 +50,12 @@ aliases, preserved upstream licenses, and recorded upstream revisions.
 ### 4. Observability and qualification
 
 - [x] Expose connection timing, RTT/loss/congestion and qlog hooks.
-- [ ] Qualify per-hop selection/recovery/reuse metadata and background route probes.
+- [x] Qualify per-hop selection/recovery/reuse metadata and background route probes.
 - [x] Expose HTTP/3 TLS and network peer metadata without virtual proxy addresses.
-- [ ] Document native APIs, defaults, operational bounds, and remaining limitations.
+- [x] Document native APIs, defaults, operational bounds, and remaining limitations.
 - [x] Qualify default, native TLS, HTTP/3-disabled, and plain HTTP profiles in CI.
 - [x] Qualify inherited h3/Quinn/protocol/UDP tests with bounded concurrency.
-- [ ] Qualify authenticated HTTP/2 ALTSVC frame discovery and blocking maintenance APIs.
+- [x] Qualify authenticated HTTP/2 ALTSVC frame discovery and blocking maintenance APIs.
 
 ## Acceptance
 
@@ -116,7 +116,15 @@ defaults. Full Mem application integration is a separate qualification.
   Hyper fork; compatible DNS cache invalidation; ECH ClientHello wire regression;
   per-hop selection/recovery/reuse diagnostics; bounded post-TCP QUIC probes;
   runtime-independent socket rebinding; blocking API parity; persistence bounds.
-  This batch is pending its exact-commit CI.
+  All seven exact-commit CI jobs passed at `ab56f30`:
+  [qualification run](https://github.com/nowledge-co/htrio/actions/runs/42172939161).
+- Follow-up hardening retains ECH privacy on the connection after DNS records
+  expire and pins selected ECH requirements across setup/retries. Expired service
+  metadata cannot authorize a clear-SNI handshake. It also avoids invoking
+  application DNS hooks under pool/health locks and
+  rejects stale network notifications. Regressions cover hook reentrancy and
+  generation ordering/wrap. Every new main commit must pass its own CI;
+  historical qualification never substitutes for the current commit's result.
 
 ## Deliberate boundaries
 

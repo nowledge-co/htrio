@@ -1214,7 +1214,7 @@ where
         Ok(())
     }
 
-    /// Send a set of trailers to end the request.
+    /// Send trailers without closing the stream; the caller must also call `finish`.
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     pub async fn send_trailers(&mut self, trailers: HeaderMap) -> Result<(), StreamError> {
         //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2

@@ -22,22 +22,18 @@ use std::{
     task::{Context, Poll},
 };
 
-/// Manage request bodies transfer, response and trailers.
+/// Transfer a request body and receive response headers, data, and trailers.
 ///
 /// Once a request has been sent via [`crate::client::SendRequest::send_request()`], a response can be awaited by calling
 /// [`RequestStream::recv_response()`]. A body for this request can be sent with [`RequestStream::send_data()`], then the request
-/// shall be completed by either sending trailers with  [`RequestStream::finish()`].
+/// must be completed with [`RequestStream::finish()`], including after
+/// [`RequestStream::send_trailers()`].
 ///
-/// After receiving the response's headers, it's body can be read by [`RequestStream::recv_data()`] until it returns
+/// After receiving final response headers, its body can be read by [`RequestStream::recv_data()`] until it returns
 /// `None`. Then the trailers will eventually be available via [`RequestStream::recv_trailers()`].
 ///
-/// TODO: If data is polled before the response has been received, an error will be thrown.
-///
-/// TODO: If trailers are polled but the body hasn't been fully received, an UNEXPECT_FRAME error will be
-/// thrown
-///
-/// Whenever the client wants to cancel this request, it can call [`RequestStream::stop_sending()`], which will
-/// put an end to any transfer concerning it.
+/// To cancel both directions, reset the upload with [`RequestStream::stop_stream()`]
+/// and stop the response with [`RequestStream::stop_sending()`].
 ///
 /// # Examples
 ///
@@ -175,14 +171,13 @@ where
         Ok(resp)
     }
 
-    /// Receive some of the request body.
-    // TODO what if called before recv_response ?
+    /// Receive response data after the final response headers.
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     pub async fn recv_data(&mut self) -> Result<Option<impl Buf>, StreamError> {
         future::poll_fn(|cx| self.poll_recv_data(cx)).await
     }
 
-    /// Receive request body
+    /// Poll for response data after the final response headers.
     pub fn poll_recv_data(
         &mut self,
         cx: &mut Context<'_>,
@@ -259,7 +254,7 @@ where
         self.inner.stop_stream(error_code);
     }
 
-    /// Send a set of trailers to end the request.
+    /// Send the request's trailer section.
     ///
     /// [`RequestStream::finish()`] must be called to finalize a request.
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
@@ -267,7 +262,7 @@ where
         self.inner.send_trailers(trailers).await
     }
 
-    /// End the request without trailers.
+    /// Close the request's send direction, with or without trailers.
     ///
     /// [`RequestStream::finish()`] must be called to finalize a request.
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]

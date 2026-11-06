@@ -23,6 +23,21 @@ use std::time::Duration;
 
 pub(crate) use pool::{can_send_early, PoolClient};
 
+/// Destination and handshake policy retained for one request hop and its retries.
+#[derive(Clone)]
+pub(crate) struct Route {
+    pub(crate) authority: Authority,
+    pub(crate) requires_ech: bool,
+}
+impl From<&crate::alt_svc::Alternative> for Route {
+    fn from(alternative: &crate::alt_svc::Alternative) -> Self {
+        Self {
+            authority: alternative.authority.clone(),
+            requires_ech: alternative.requires_ech,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct H3Client {
     pool: Pool,
@@ -66,7 +81,7 @@ impl H3Client {
     pub(crate) async fn prepare(
         &mut self,
         origin: &Uri,
-        alternative: Option<Authority>,
+        alternative: Option<Route>,
         proxy: Option<&crate::proxy::Intercepted>,
         allow_early: bool,
         deadline: Option<tokio::time::Instant>,
@@ -76,17 +91,23 @@ impl H3Client {
                 .await
                 .into_iter()
                 .next()
-                .map(|alternative| alternative.authority)
+                .as_ref()
+                .map(Route::from)
         } else {
             alternative
         };
+        let requires_ech = alternative
+            .as_ref()
+            .is_some_and(|alternative| alternative.requires_ech);
         let mut key = pool::extract_domain(origin)?;
         if let Some(alternative) = alternative {
-            key.2 = alternative;
+            key.2 = alternative.authority;
         }
         key.3 = proxy.map(pool::ProxyKey::new);
         if let Some(mut client) = self.pool.try_pool(&key) {
-            if allow_early || client.info.early.accepted().await {
+            if (!requires_ech || client.info.uses_ech())
+                && (allow_early || client.info.early.accepted().await)
+            {
                 trace!("getting HTTP/3 client from pool with key {key:?}");
                 return Ok(client);
             }
@@ -96,14 +117,9 @@ impl H3Client {
             let health = self.health.lock().unwrap();
             health.coalescing_rejected.len() < 256 && !health.coalescing_rejected.contains(&key)
         };
-        if may_coalesce {
+        if may_coalesce && !requires_ech {
             for (previous, client) in self.pool.coalescing_candidates(&key) {
-                if self.connector.can_coalesce(
-                    origin,
-                    &pool::domain_as_uri(previous.clone()),
-                    &key.2,
-                    &client.info.connection,
-                ) {
+                if self.connector.can_coalesce(origin, &key.2, &client.info) {
                     if let Some(client) = self.pool.alias(key.clone(), &previous) {
                         return Ok(client);
                     }
@@ -112,10 +128,14 @@ impl H3Client {
         }
         let lock = match self.pool.connecting(&key) {
             pool::Connecting::InProgress(waiter) => {
-                return waiter
+                let client = waiter
                     .receive()
                     .await
-                    .ok_or_else(|| "failed to establish HTTP/3 connection".into());
+                    .ok_or("failed to establish HTTP/3 connection")?;
+                if requires_ech && !client.info.uses_ech() {
+                    return Err("selected ECH route requires a new encrypted handshake".into());
+                }
+                return Ok(client);
             }
             pool::Connecting::Acquired(lock) => lock,
         };
@@ -123,9 +143,18 @@ impl H3Client {
         let generation = self.health.lock().unwrap().generation;
         let direct = proxy.is_none();
         let destination = pool::domain_as_uri(key.clone());
-        let (driver, tx, endpoint, connection, early) = self
+        let established = self
             .connector
-            .connect(destination, key.2.clone(), proxy, allow_early, deadline)
+            .connect(
+                destination,
+                Route {
+                    authority: key.2.clone(),
+                    requires_ech,
+                },
+                proxy,
+                allow_early,
+                deadline,
+            )
             .await?;
         {
             let mut health = self.health.lock().unwrap();
@@ -135,14 +164,10 @@ impl H3Client {
         }
         Ok(self.pool.new_connection(
             lock,
-            driver,
-            tx,
-            endpoint,
-            connection,
+            established,
             direct,
             started.elapsed(),
             self.connector.tls_info(),
-            early,
         ))
     }
 
@@ -177,8 +202,19 @@ impl H3Client {
     }
 
     pub(crate) fn network_generation(&mut self, generation: u64) -> bool {
+        let is_newer = |current: u64| {
+            let distance = generation.wrapping_sub(current);
+            distance != 0 && distance < (1_u64 << 63)
+        };
+        if !is_newer(self.health.lock().unwrap().generation) {
+            return false;
+        }
+        // Resolver hooks are application code and may inspect client statistics.
+        // Never invoke them while holding a pool or route-health lock.
+        self.connector.clear_dns_cache();
         let mut health = self.health.lock().unwrap();
-        if health.generation != generation {
+        // A concurrent notification may have already installed a newer network.
+        if is_newer(health.generation) {
             health.generation = generation;
             health.failed.clear();
             health.coalescing_rejected.clear();
@@ -321,5 +357,50 @@ impl H3Client {
             key.3 = proxy.map(pool::ProxyKey::new);
             self.pool.remove(&key);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn stale_network_notifications_cannot_restore_an_old_generation() {
+        struct Resolver(Arc<AtomicUsize>);
+        impl crate::dns::Resolve for Resolver {
+            fn resolve(&self, _: crate::dns::Name) -> crate::dns::Resolving {
+                unreachable!("network invalidation does not resolve addresses")
+            }
+            fn clear_cache(&self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+        let connector = H3Connector::new(
+            crate::dns::DynResolver::new(Arc::new(Resolver(calls.clone()))),
+            tls,
+            None,
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap();
+        let mut client = H3Client::new(connector, None);
+        assert!(client.network_generation(2));
+        assert!(!client.network_generation(1));
+        assert!(!client.network_generation(2));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        client.health.lock().unwrap().generation = u64::MAX;
+        assert!(client.network_generation(0));
+        assert!(!client.network_generation(u64::MAX));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

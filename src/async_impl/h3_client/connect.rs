@@ -17,13 +17,14 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-type H3Connection = (
-    h3::client::Connection<Connection, Bytes>,
-    SendRequest<OpenStreams, Bytes>,
-    Endpoint,
-    quinn::Connection,
-    super::session::EarlyData,
-);
+pub(super) struct H3Connection {
+    pub(super) driver: h3::client::Connection<Connection, Bytes>,
+    pub(super) sender: SendRequest<OpenStreams, Bytes>,
+    pub(super) endpoint: Endpoint,
+    pub(super) connection: quinn::Connection,
+    pub(super) early: super::session::EarlyData,
+    pub(super) ech: bool,
+}
 
 const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
 
@@ -235,18 +236,16 @@ impl H3Connector {
     pub(crate) fn can_coalesce(
         &self,
         origin: &Uri,
-        previous: &Uri,
         destination: &http::uri::Authority,
-        connection: &quinn::Connection,
+        info: &crate::http3::ConnectionInfo,
     ) -> bool {
+        let connection = &info.connection;
         if connection.is_handshaking()
+            || info.uses_ech()
             || !self.client_config.coalescing
             || self.tls.client_auth_cert_resolver.has_certs()
             || self
                 .service(origin, destination)
-                .is_some_and(|service| service.ech_config_list.is_some())
-            || self
-                .service(previous, destination)
                 .is_some_and(|service| service.ech_config_list.is_some())
         {
             return false;
@@ -358,14 +357,18 @@ impl H3Connector {
         Ok(config)
     }
 
-    pub async fn connect(
+    pub(super) async fn connect(
         &mut self,
         origin: Uri,
-        alternative: http::uri::Authority,
+        route: super::Route,
         proxy: Option<&crate::proxy::Intercepted>,
         allow_early: bool,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<H3Connection, BoxError> {
+        let super::Route {
+            authority: alternative,
+            requires_ech,
+        } = route;
         let server_name = origin
             .host()
             .ok_or("origin must have a host")?
@@ -376,6 +379,12 @@ impl H3Connector {
             .trim_start_matches('[')
             .trim_end_matches(']');
         let service = self.service(&origin, &alternative);
+        let ech = service
+            .as_ref()
+            .is_some_and(|service| service.ech_config_list.is_some());
+        if requires_ech && !ech {
+            return Err("selected ECH route no longer has usable service metadata".into());
+        }
         let route = self.route(&origin, &alternative, proxy)?;
         let quic_config = self.route_config(service.as_ref(), &route)?;
         if let Some(proxy) = proxy {
@@ -391,7 +400,11 @@ impl H3Connector {
                     allow_early,
                     deadline,
                 )
-                .await;
+                .await
+                .map(|mut established| {
+                    established.ech = ech;
+                    established
+                });
             #[cfg(not(feature = "socks"))]
             {
                 let _ = proxy;
@@ -425,6 +438,10 @@ impl H3Connector {
             deadline,
         )
         .await
+        .map(|mut established| {
+            established.ech = ech;
+            established
+        })
     }
 
     pub(crate) fn tls_info(&self) -> bool {
@@ -436,12 +453,15 @@ impl H3Connector {
         // bind on the new network without migrating a SOCKS association.
         self.network_epoch
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.resolver.clear_cache();
         *self.endpoint.lock().unwrap() = DirectEndpoint::default();
         self.services.lock().unwrap().clear();
         for route in self.routes.lock().unwrap().values() {
             route.quic.lock().unwrap().take();
         }
+    }
+
+    pub(super) fn clear_dns_cache(&self) {
+        self.resolver.clear_cache();
     }
 
     fn endpoint(&self) -> Result<Endpoint, BoxError> {
@@ -670,7 +690,14 @@ impl H3Connector {
             builder.send_grease(grease);
         }
         let (driver, sender) = builder.build(Connection::new(connection.clone())).await?;
-        Ok((driver, sender, endpoint.clone(), connection, early))
+        Ok(H3Connection {
+            driver,
+            sender,
+            endpoint: endpoint.clone(),
+            connection,
+            early,
+            ech: false,
+        })
     }
 }
 

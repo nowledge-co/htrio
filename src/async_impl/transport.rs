@@ -47,7 +47,7 @@ mod http3 {
 
     use super::super::body::{boxed, ResponseBody};
     use super::super::client::HyperClient;
-    use super::super::h3_client::{H3Client, PoolClient};
+    use super::super::h3_client::{H3Client, PoolClient, Route};
     use crate::alt_svc::AltSvcCache;
     use crate::error::{self, BoxError};
     use crate::http3::{RecoveryReason, TransportInfo, TransportSelection};
@@ -282,14 +282,7 @@ mod http3 {
                                 );
                             }
                             match self
-                                .dispatch(
-                                    connection,
-                                    request,
-                                    &origin,
-                                    Some(alternative.authority.clone()),
-                                    proxy.as_ref(),
-                                    true,
-                                )
+                                .dispatch(connection, request, &origin, proxy.as_ref(), true)
                                 .await
                             {
                                 Ok(mut response)
@@ -373,7 +366,7 @@ mod http3 {
                     .await?;
                 *request.version_mut() = Version::HTTP_3;
                 let mut response = self
-                    .dispatch(connection, request, &origin, None, proxy.as_ref(), false)
+                    .dispatch(connection, request, &origin, proxy.as_ref(), false)
                     .await
                     .map_err(error::request)?;
                 self.annotate(&mut response, started, TransportSelection::ExplicitHttp3);
@@ -404,7 +397,7 @@ mod http3 {
                 match self
                     .prepare_with_early(
                         origin,
-                        Some(alternative.authority.clone()),
+                        Some(Route::from(&alternative)),
                         proxy,
                         true,
                         allow_early,
@@ -426,10 +419,12 @@ mod http3 {
             mut connection: PoolClient,
             request: Request<Body>,
             origin: &Uri,
-            alternative: Option<http::uri::Authority>,
             proxy: Option<&crate::proxy::Intercepted>,
             automatic: bool,
         ) -> Result<Response<ResponseBody>, BoxError> {
+            // Retain this hop's privacy requirement across confirmed retries.
+            // A record expiring between attempts cannot authorize clear SNI.
+            let alternative = connection.route();
             let mut pending = Some(request);
             let mut recovery = None;
             for attempt in 0..2 {
@@ -457,7 +452,7 @@ mod http3 {
                 );
                 self.client.as_ref().unwrap().retire_connection(&connection);
                 connection = self
-                    .prepare_with_early(origin, alternative.clone(), proxy, automatic, false)
+                    .prepare_with_early(origin, Some(alternative.clone()), proxy, automatic, false)
                     .await
                     .map_err(|error| Box::new(error) as BoxError)?;
             }
@@ -467,7 +462,7 @@ mod http3 {
         async fn prepare_with_early(
             &mut self,
             origin: &Uri,
-            alternative: Option<http::uri::Authority>,
+            alternative: Option<Route>,
             proxy: Option<&crate::proxy::Intercepted>,
             automatic: bool,
             allow_early: bool,
@@ -518,7 +513,10 @@ mod http3 {
                 let result = transport
                     .prepare_with_early(
                         &origin,
-                        Some(alternative.clone()),
+                        Some(Route {
+                            authority: alternative.clone(),
+                            requires_ech: false,
+                        }),
                         proxy.as_ref(),
                         true,
                         false,
