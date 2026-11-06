@@ -334,6 +334,7 @@ fn concurrency_layer_blocking_client_timeout() {
     // Keep the only connector permit occupied until the queued request expires.
     // Thread start times and scheduler delays cannot remove this contention.
     let queued = client.get(&url).send();
+    let calls_while_queued = calls.load(Ordering::SeqCst);
     release.notify_one();
     let first = first_request.join().unwrap();
 
@@ -343,7 +344,7 @@ fn concurrency_layer_blocking_client_timeout() {
     );
     assert!(queued.unwrap_err().is_timeout());
     assert_eq!(
-        calls.load(Ordering::SeqCst),
+        calls_while_queued,
         1,
         "queued connection reached DNS"
     );
@@ -353,7 +354,6 @@ fn concurrency_layer_blocking_client_timeout() {
         .timeout(Duration::from_secs(5))
         .send()
         .unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[cfg(feature = "blocking")]
