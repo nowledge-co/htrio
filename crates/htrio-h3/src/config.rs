@@ -25,6 +25,10 @@ pub struct Config {
 /// HTTP/3 Settings
 #[derive(Debug, Clone, Copy)]
 pub struct Settings {
+    /// Maximum QPACK decoder dynamic table capacity.
+    pub(crate) qpack_max_table_capacity: u64,
+    /// Maximum simultaneously blocked QPACK streams.
+    pub(crate) qpack_blocked_streams: u64,
     /// Maximum decoded field section size, including per-field overhead.
     pub(crate) max_field_section_size: u64,
 
@@ -46,6 +50,12 @@ impl From<&frame::Settings> for Settings {
     fn from(settings: &frame::Settings) -> Self {
         let defaults: Self = Default::default();
         Self {
+            qpack_max_table_capacity: settings
+                .get(frame::SettingId::QPACK_MAX_TABLE_CAPACITY)
+                .unwrap_or(0),
+            qpack_blocked_streams: settings
+                .get(frame::SettingId::QPACK_MAX_BLOCKED_STREAMS)
+                .unwrap_or(0),
             max_field_section_size: settings
                 .get(frame::SettingId::MAX_HEADER_LIST_SIZE)
                 .unwrap_or(defaults.max_field_section_size),
@@ -81,6 +91,8 @@ impl TryFrom<Config> for frame::Settings {
             settings:
                 Settings {
                     max_field_section_size,
+                    qpack_max_table_capacity,
+                    qpack_blocked_streams,
                     enable_webtransport,
                     enable_extended_connect,
                     enable_datagram,
@@ -113,6 +125,14 @@ impl TryFrom<Config> for frame::Settings {
         }
 
         settings.insert(
+            frame::SettingId::QPACK_MAX_TABLE_CAPACITY,
+            qpack_max_table_capacity,
+        )?;
+        settings.insert(
+            frame::SettingId::QPACK_MAX_BLOCKED_STREAMS,
+            qpack_blocked_streams,
+        )?;
+        settings.insert(
             frame::SettingId::MAX_HEADER_LIST_SIZE,
             max_field_section_size,
         )?;
@@ -138,6 +158,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             max_field_section_size: VarInt::MAX.0,
+            qpack_max_table_capacity: 0,
+            qpack_blocked_streams: 0,
             enable_webtransport: false,
             enable_extended_connect: false,
             enable_datagram: false,

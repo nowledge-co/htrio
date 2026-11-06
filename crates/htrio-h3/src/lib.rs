@@ -56,6 +56,9 @@ mod webtransport;
 
 #[allow(dead_code)]
 mod qpack;
+
+/// Connection header compression counters.
+pub use qpack::state::Stats as QpackStats;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

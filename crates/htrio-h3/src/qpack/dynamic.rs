@@ -82,9 +82,11 @@ impl<'a> DynamicTableEncoder<'a> {
     }
 
     pub(super) fn commit(&mut self, largest_ref: usize) {
-        self.table
-            .track_block(self.stream_id, self.block_refs.clone());
-        self.table.register_blocked(largest_ref);
+        if largest_ref != 0 {
+            self.table
+                .track_block(self.stream_id, self.block_refs.clone());
+            self.table.register_blocked(largest_ref);
+        }
         self.commited = true;
     }
 
@@ -94,6 +96,12 @@ impl<'a> DynamicTableEncoder<'a> {
 
     fn lookup_result(&mut self, absolute: Option<usize>) -> DynamicLookupResult {
         match absolute {
+            Some(absolute)
+                if absolute > self.table.largest_known_received
+                    && self.table.blocked_count >= self.table.blocked_max =>
+            {
+                DynamicLookupResult::NotFound
+            }
             Some(absolute) if absolute <= self.base => {
                 self.track_ref(absolute);
                 DynamicLookupResult::Relative {
@@ -341,6 +349,45 @@ impl DynamicTable {
         self.vas.total_inserted()
     }
 
+    pub(super) fn tracked_sections(&self) -> usize {
+        self.track_blocks.values().map(|blocks| blocks.len()).sum()
+    }
+
+    pub(super) fn acknowledge_header(&mut self, stream_id: u64) -> Result<(), Error> {
+        let largest = self
+            .track_blocks
+            .get(&stream_id)
+            .and_then(|blocks| blocks.front())
+            .and_then(|refs| refs.keys().max())
+            .copied()
+            .ok_or(Error::UnknownStreamId(stream_id))?;
+        if largest > self.largest_known_received {
+            self.update_largest_received(largest - self.largest_known_received);
+        }
+        self.untrack_block(stream_id)
+    }
+
+    pub(super) fn acknowledge_inserts(&mut self, increment: usize) -> Result<(), Error> {
+        if increment == 0
+            || self
+                .largest_known_received
+                .checked_add(increment)
+                .is_none_or(|count| count > self.total_inserted())
+        {
+            return Err(Error::BadIndex(increment));
+        }
+        self.update_largest_received(increment);
+        Ok(())
+    }
+
+    pub(super) fn cancel_stream(&mut self, stream_id: u64) {
+        while self.track_blocks.contains_key(&stream_id) {
+            if self.untrack_block(stream_id).is_err() {
+                break;
+            }
+        }
+    }
+
     pub(super) fn untrack_block(&mut self, stream_id: u64) -> Result<(), Error> {
         let mut entry = self.track_blocks.entry(stream_id);
         let block = match entry {
@@ -352,6 +399,20 @@ impl DynamicTable {
         };
 
         if let Some(b) = block {
+            if let Some(largest) = b
+                .keys()
+                .max()
+                .copied()
+                .filter(|largest| *largest > self.largest_known_received)
+            {
+                if let BTEntry::Occupied(mut entry) = self.blocked_streams.entry(largest) {
+                    *entry.get_mut() -= 1;
+                    self.blocked_count -= 1;
+                    if *entry.get() == 0 {
+                        entry.remove();
+                    }
+                }
+            }
             self.track_cancel(b.iter().map(|(x, y)| (*x, *y)))?;
         }
         Ok(())

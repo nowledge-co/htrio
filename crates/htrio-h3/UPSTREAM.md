@@ -27,3 +27,12 @@ Local changes are tracked in this repository and shipped with htrio.
 Run the inherited protocol suite with `cargo test -p htrio-h3 --all-features
 --lib -- --test-threads=2`. The inherited tests use the optional backend
 inspection feature; htrio's runtime dependency does not require it.
+
+- Integrate bounded connection QPACK tables, encoder/decoder instruction streams,
+  blocked section wakeups, acknowledgements, and cancellation. Keep sensitive
+  sections stateless. Check insert increments and track only referenced sections.
+- Add priority update queues and preserve pending response headers when a
+  future is cancelled while waiting for QPACK instructions.
+
+When enabling dynamic compression in a low-level server, continue polling the
+connection while request resolver futures await encoder instructions.

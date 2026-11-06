@@ -23,7 +23,6 @@ use crate::{
     },
     frame::FrameStream,
     proto::{frame::Frame, headers::Header, push::PushId},
-    qpack,
     quic::{self, StreamId},
     shared_state::{ConnectionState, SharedState},
     stream::{self, BufRecvStream},
@@ -145,6 +144,11 @@ where
     T: quic::OpenStreams<B>,
     B: Buf,
 {
+    /// Header compression counters for this connection.
+    pub fn qpack_stats(&self) -> crate::QpackStats {
+        self.conn_state.qpack.stats()
+    }
+
     /// Whether this connection can still accept new requests.
     ///
     /// A received GOAWAY immediately retires the connection, even while existing
@@ -224,12 +228,23 @@ where
         }
 
         let mut block = BytesMut::new();
-        let mem_size = qpack::encode_stateless(&mut block, headers).map_err(|_e| {
-            self.handle_connection_error_on_stream(InternalConnectionError {
-                code: Code::H3_INTERNAL_ERROR,
-                message: "Failed to encode headers".to_string(),
-            })
-        })?;
+        let sensitive = headers.is_sensitive();
+        let mem_size = self
+            .conn_state
+            .qpack
+            .encode(
+                stream.send_id().into_inner(),
+                &mut block,
+                headers,
+                sensitive,
+                self.settings().max_field_section_size,
+            )
+            .map_err(|_e| {
+                self.handle_connection_error_on_stream(InternalConnectionError {
+                    code: Code::H3_INTERNAL_ERROR,
+                    message: "Failed to encode headers".to_string(),
+                })
+            })?;
 
         //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
         //# An implementation that
@@ -252,6 +267,7 @@ where
             .map_err(|e| self.handle_quic_stream_error(e))?;
 
         let request_stream = RequestStream {
+            pending_response: None,
             inner: connection::RequestStream::new(
                 FrameStream::new(BufRecvStream::new(stream))
                     .with_max_frame_size(self.max_frame_size),

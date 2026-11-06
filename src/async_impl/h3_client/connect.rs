@@ -42,6 +42,7 @@ pub(crate) struct H3ClientConfig {
 
     /// Send reserved protocol values to exercise peers' extension handling.
     pub(crate) send_grease: Option<bool>,
+    pub(crate) qpack: (u64, u64),
 }
 
 impl Default for H3ClientConfig {
@@ -52,6 +53,7 @@ impl Default for H3ClientConfig {
             tls_info: false,
             verifier: None,
             send_grease: None,
+            qpack: (4096, 16),
         }
     }
 }
@@ -463,6 +465,7 @@ impl H3Connector {
     ) -> Result<H3Connection, BoxError> {
         let mut builder = h3::client::builder();
         builder.enable_extended_connect(true);
+        builder.qpack(config.qpack.0, config.qpack.1);
         if let Some(size) = config.max_field_section_size {
             builder.max_field_section_size(size);
         }

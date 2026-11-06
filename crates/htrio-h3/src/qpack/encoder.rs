@@ -47,9 +47,30 @@ impl std::fmt::Display for EncoderError {
 
 pub struct Encoder {
     table: DynamicTable,
+    max_capacity: usize,
 }
 
 impl Encoder {
+    pub(super) fn configure(
+        &mut self,
+        capacity: usize,
+        blocked: usize,
+        wire: &mut Vec<u8>,
+        max_capacity: usize,
+    ) -> Result<(), EncoderError> {
+        self.max_capacity = max_capacity;
+        self.table.set_max_blocked(blocked)?;
+        set_dynamic_table_size(&mut self.table, wire, capacity)
+    }
+
+    pub(super) fn tracked_sections(&self) -> usize {
+        self.table.tracked_sections()
+    }
+
+    pub(super) fn inserted(&self) -> usize {
+        self.table.total_inserted()
+    }
+
     pub fn encode<W, T, H>(
         &mut self,
         stream_id: u64,
@@ -78,7 +99,7 @@ impl Encoder {
             required_ref,
             encoder.base(),
             encoder.total_inserted(),
-            encoder.max_size(),
+            self.max_capacity,
         )
         .encode(block);
         block.put(block_buf.as_slice());
@@ -91,17 +112,10 @@ impl Encoder {
     pub fn on_decoder_recv<R: Buf>(&mut self, read: &mut R) -> Result<(), EncoderError> {
         while let Some(instruction) = Action::parse(read)? {
             match instruction {
-                Action::Untrack(stream_id) => self.table.untrack_block(stream_id)?,
-                Action::StreamCancel(stream_id) => {
-                    // Untrack block twice, as this stream might have a trailer in addition to
-                    // the header. Failures are ignored as blocks might have been acked before
-                    // cancellation.
-                    if self.table.untrack_block(stream_id).is_ok() {
-                        let _ = self.table.untrack_block(stream_id);
-                    }
-                }
+                Action::Untrack(stream_id) => self.table.acknowledge_header(stream_id)?,
+                Action::StreamCancel(stream_id) => self.table.cancel_stream(stream_id),
                 Action::ReceivedRefIncrement(increment) => {
-                    self.table.update_largest_received(increment)
+                    self.table.acknowledge_inserts(increment)?
                 }
             }
         }
@@ -185,6 +199,7 @@ impl Default for Encoder {
     fn default() -> Self {
         Self {
             table: DynamicTable::new(),
+            max_capacity: 0,
         }
     }
 }
@@ -217,7 +232,10 @@ where
 #[cfg(test)]
 impl From<DynamicTable> for Encoder {
     fn from(table: DynamicTable) -> Encoder {
-        Encoder { table }
+        Encoder {
+            max_capacity: table.max_mem_size(),
+            table,
+        }
     }
 }
 
@@ -645,9 +663,7 @@ mod tests {
             Ok(Some(Action::ReceivedRefIncrement(4)))
         );
 
-        let mut encoder = Encoder {
-            table: build_table(),
-        };
+        let mut encoder = Encoder::from(crate::qpack::tests::helpers::build_table_with_size(4));
 
         let mut cur = Cursor::new(&buf);
         assert_eq!(encoder.on_decoder_recv(&mut cur), Ok(()));

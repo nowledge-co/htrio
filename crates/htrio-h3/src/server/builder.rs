@@ -66,6 +66,18 @@ impl Builder {
         self
     }
 
+    /// Bound the QPACK decoder table (at most 64 KiB) and blocked streams (at most 64).
+    /// A zero capacity retains stateless header compression.
+    pub fn qpack(&mut self, capacity: u64, blocked_streams: u64) -> &mut Self {
+        self.config.settings.qpack_max_table_capacity = capacity.min(65536);
+        self.config.settings.qpack_blocked_streams = if capacity == 0 {
+            0
+        } else {
+            blocked_streams.min(64)
+        };
+        self
+    }
+
     /// Bound encoded payloads buffered for non-DATA frames (default: 1 MiB).
     /// Unknown frames are skipped without buffering their complete payloads.
     pub fn max_frame_size(&mut self, size: u64) -> &mut Self {

@@ -526,3 +526,62 @@ async fn invalid_dns_ech_never_falls_back_to_a_plaintext_sni_connection() {
         0
     );
 }
+
+#[tokio::test]
+async fn dynamic_qpack_headers_and_trailers_share_bounded_connection_state() {
+    let server = Server::new(|request, mut stream| async move {
+        assert_eq!(
+            request.headers()["x-compressible"],
+            "repeated-request-metadata"
+        );
+        stream
+            .send_response(
+                Response::builder()
+                    .header("x-compressible", "repeated-response-metadata")
+                    .body(())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut trailers = HeaderMap::new();
+        trailers.insert(
+            "x-compressible-trailer",
+            HeaderValue::from_static("repeated-trailer-metadata"),
+        );
+        stream.send_trailers(trailers).await.unwrap();
+        stream.finish().await.unwrap();
+    })
+    .await;
+    let client = server
+        .client_builder()
+        .http3_qpack(4096, 16)
+        .build()
+        .unwrap();
+    let mut info = None;
+    for _ in 0..4 {
+        let response = client
+            .get(server.url("/qpack"))
+            .header("x-compressible", "repeated-request-metadata")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers()["x-compressible"],
+            "repeated-response-metadata"
+        );
+        info = response
+            .extensions()
+            .get::<htrio::http3::ConnectionInfo>()
+            .cloned();
+        let response: http::Response<htrio::Body> = response.into();
+        let collected = response.into_body().collect().await.unwrap();
+        assert_eq!(
+            collected.trailers().unwrap()["x-compressible-trailer"],
+            "repeated-trailer-metadata"
+        );
+    }
+    let stats = info.unwrap().qpack_stats();
+    assert!(stats.encoded_inserts > 0);
+    assert!(stats.decoded_inserts > 0);
+    assert_eq!(stats.blocked_sections, 0);
+}

@@ -85,3 +85,11 @@ defaults. Full Mem application integration is a separate qualification.
   HTTPS service metadata. Hickory alias resolution and ECH route rebuilding are
   bounded; ECH routes do not downgrade to clear-SNI TCP. Dynamic QPACK, 0-RTT,
   and authenticated coalescing remain in progress.
+
+- `e62ca17`: all seven CI jobs passed, including the three native platforms,
+  service metadata/ECH rejection, priority, cancellation, route racing, migration,
+  and inherited protocol/transport regressions.
+- Dynamic QPACK batch: integrate bounded tables/instruction streams/queues,
+  blocked-section wakeups, ACK/cancellation, sensitive-section bypass, and size
+  limits. Keep encoded response headers across cancelled receive futures. Add
+  fragmented instruction, prefix wrap, limits, and real header/trailer tests.

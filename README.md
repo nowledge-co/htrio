@@ -133,6 +133,11 @@ direct peers; SOCKS virtual addresses stay private. `tls_info(true)` includes th
 peer certificate. `http3_transport_config()` accepts native QUIC settings,
 including application-owned qlog streams with the `http3-qlog` feature.
 
+Dynamic QPACK uses a 4096-byte table and at most 16 blocked streams by default.
+`http3_qpack()` changes these limits or disables dynamic compression. Tables,
+instruction queues, outstanding sections, and decoded field sizes are bounded.
+Authorization, Cookie, and explicitly sensitive fields use stateless sections.
+
 `RequestBuilder::priority()` sends RFC 9218 urgency and incremental hints and
 maps urgency to QUIC scheduling. The response's `http3::RequestPriority` extension
 can enqueue bounded, coalesced PRIORITY_UPDATE messages.

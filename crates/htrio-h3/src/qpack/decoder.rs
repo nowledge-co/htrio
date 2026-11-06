@@ -80,14 +80,33 @@ pub struct Decoded {
 
 pub struct Decoder {
     table: DynamicTable,
+    max_capacity: usize,
 }
 
 impl Decoder {
+    pub(super) fn with_capacity(max_capacity: usize) -> Self {
+        Self {
+            table: DynamicTable::new(),
+            max_capacity,
+        }
+    }
+    pub(super) fn inserted(&self) -> usize {
+        self.table.total_inserted()
+    }
+
     // Decode field lines received on Request of Push stream.
     // https://www.rfc-editor.org/rfc/rfc9204.html#name-field-line-representations
     pub fn decode_header<T: Buf>(&self, buf: &mut T) -> Result<Decoded, DecoderError> {
-        let (required_ref, base) = HeaderPrefix::decode(buf)?
-            .get(self.table.total_inserted(), self.table.max_mem_size())?;
+        self.decode_header_with_limit(buf, u64::MAX)
+    }
+
+    pub(super) fn decode_header_with_limit<T: Buf>(
+        &self,
+        buf: &mut T,
+        max_size: u64,
+    ) -> Result<Decoded, DecoderError> {
+        let (required_ref, base) =
+            HeaderPrefix::decode(buf)?.get(self.table.total_inserted(), self.max_capacity)?;
 
         if required_ref > self.table.total_inserted() {
             return Err(DecoderError::MissingRefs(required_ref));
@@ -100,6 +119,9 @@ impl Decoder {
         while buf.has_remaining() {
             let field = Self::parse_header_field(&decoder_table, buf)?;
             mem_size += field.mem_size() as u64;
+            if mem_size > max_size {
+                return Err(DecoderError::HeaderTooLong(mem_size));
+            }
             fields.push(field);
         }
 
@@ -125,6 +147,11 @@ impl Decoder {
             match instruction {
                 Instruction::Insert(field) => self.table.put(field)?,
                 Instruction::TableSizeUpdate(size) => {
+                    if size > self.max_capacity {
+                        return Err(DecoderError::DynamicTable(
+                            DynamicTableError::MaximumTableSizeTooLarge,
+                        ));
+                    }
                     self.table.set_max_size(size)?;
                 }
             }
@@ -264,7 +291,15 @@ pub fn decode_stateless<T: Buf>(buf: &mut T, max_size: u64) -> Result<Decoded, D
 #[cfg(test)]
 impl From<DynamicTable> for Decoder {
     fn from(table: DynamicTable) -> Self {
-        Self { table }
+        let max_capacity = table.max_mem_size();
+        Self {
+            table,
+            max_capacity: if max_capacity == 0 {
+                1_073_741_823
+            } else {
+                max_capacity
+            },
+        }
     }
 }
 

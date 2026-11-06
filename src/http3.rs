@@ -7,6 +7,8 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+/// Header compression counters.
+pub use h3::QpackStats;
 pub use quinn::{ConnectionStats, TransportConfig};
 #[cfg(feature = "http3-qlog")]
 pub use quinn::{QlogConfig, QlogStream};
@@ -41,6 +43,10 @@ impl ConnectionInfo {
     /// Packet, byte, congestion, loss, and path MTU counters.
     pub fn stats(&self) -> ConnectionStats {
         self.connection.stats()
+    }
+    /// Dynamic QPACK insertion and blocked-section counters.
+    pub fn qpack_stats(&self) -> h3::QpackStats {
+        self.sender.qpack_stats()
     }
     /// Actual network peer for direct connections; proxy virtual addresses are omitted.
     pub fn remote_addr(&self) -> Option<SocketAddr> {

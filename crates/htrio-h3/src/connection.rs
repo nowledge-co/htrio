@@ -63,6 +63,8 @@ where
     C: quic::Connection<B>,
     B: Buf,
 {
+    decoder_input: bytes::BytesMut,
+    encoder_input: bytes::BytesMut,
     decoder_send: Option<C::SendStream>,
     decoder_recv: Option<AcceptedRecvStream<C::RecvStream, B>>,
     encoder_send: Option<C::SendStream>,
@@ -252,6 +254,10 @@ where
         //# unidirectional streams required by mandatory extensions (such as the
         //# QPACK encoder and decoder streams) first, and then create additional
 
+        shared.qpack.local(
+            config.settings.qpack_max_table_capacity,
+            config.settings.qpack_blocked_streams,
+        );
         // start streams
         let (control_send, qpack_encoder, qpack_decoder) = (
             future::poll_fn(|cx| conn.poll_open_send(cx)).await,
@@ -290,6 +296,8 @@ where
         };
 
         let qpack_streams = QpackStreams {
+            decoder_input: bytes::BytesMut::new(),
+            encoder_input: bytes::BytesMut::new(),
             decoder_send: qpack_decoder.ok(),
             decoder_recv: None,
             encoder_send: qpack_encoder.ok(),
@@ -516,6 +524,7 @@ where
         let recv = {
             // TODO
             self.poll_accept_recv(cx)?;
+            self.poll_qpack(cx)?;
             if let Some(v) = &mut self.control_recv {
                 v
             } else {
@@ -588,7 +597,17 @@ where
                     // Received settings frame
 
                     self.got_peer_settings = true;
-                    self.set_settings((&settings).into());
+                    let peer: crate::config::Settings = (&settings).into();
+                    self.shared
+                        .qpack
+                        .peer(peer.qpack_max_table_capacity, peer.qpack_blocked_streams)
+                        .map_err(|error| {
+                            self.handle_connection_error(InternalConnectionError::new(
+                                Code::QPACK_ENCODER_STREAM_ERROR,
+                                error.to_string(),
+                            ))
+                        })?;
+                    self.set_settings(peer);
 
                     Frame::Settings(settings)
                 } else {
@@ -657,6 +676,93 @@ where
         }
 
         Poll::Ready(Ok(res))
+    }
+
+    fn poll_qpack(&mut self, cx: &mut Context<'_>) -> Result<(), ConnectionError> {
+        self.shared.qpack.register(cx);
+        for encoder in [true, false] {
+            let mut receive = if encoder {
+                self.qpack_streams.encoder_recv.take()
+            } else {
+                self.qpack_streams.decoder_recv.take()
+            };
+            let input = if encoder {
+                &mut self.qpack_streams.encoder_input
+            } else {
+                &mut self.qpack_streams.decoder_input
+            };
+            if let Some(AcceptedRecvStream::Encoder(stream) | AcceptedRecvStream::Decoder(stream)) =
+                receive.as_mut()
+            {
+                for index in 0..32 {
+                    match stream.poll_data(cx) {
+                        Poll::Pending => break,
+                        Poll::Ready(Err(error)) => {
+                            return Err(self.handle_critical_stream_error(error))
+                        }
+                        Poll::Ready(Ok(None)) => {
+                            return Err(self.handle_connection_error(InternalConnectionError::new(
+                                Code::H3_CLOSED_CRITICAL_STREAM,
+                                "QPACK stream closed".into(),
+                            )))
+                        }
+                        Poll::Ready(Ok(Some(mut bytes))) => {
+                            if input.len().saturating_add(bytes.remaining()) > 128 * 1024 {
+                                return Err(self.handle_connection_error(
+                                    InternalConnectionError::new(
+                                        Code::H3_EXCESSIVE_LOAD,
+                                        "QPACK instruction buffer exceeded".into(),
+                                    ),
+                                ));
+                            }
+                            input.extend_from_slice(&bytes.copy_to_bytes(bytes.remaining()));
+                            let parsed = if encoder {
+                                self.shared.qpack.encoder_recv(input).map_err(|error| {
+                                    (Code::QPACK_ENCODER_STREAM_ERROR, error.to_string())
+                                })
+                            } else {
+                                self.shared.qpack.decoder_recv(input).map_err(|error| {
+                                    (Code::QPACK_DECODER_STREAM_ERROR, error.to_string())
+                                })
+                            };
+                            if let Err((code, message)) = parsed {
+                                return Err(self.handle_connection_error(
+                                    InternalConnectionError::new(code, message),
+                                ));
+                            }
+                        }
+                    }
+                    if index == 31 {
+                        cx.waker().wake_by_ref();
+                    }
+                }
+            }
+            if encoder {
+                self.qpack_streams.encoder_recv = receive;
+            } else {
+                self.qpack_streams.decoder_recv = receive;
+            }
+            let send = if encoder {
+                self.qpack_streams.encoder_send.as_mut()
+            } else {
+                self.qpack_streams.decoder_send.as_mut()
+            };
+            if let Some(send) = send {
+                match send.poll_ready(cx) {
+                    Poll::Pending => continue,
+                    Poll::Ready(Err(error)) => return Err(self.handle_critical_stream_error(error)),
+                    Poll::Ready(Ok(())) => {}
+                }
+                let wire = self.shared.qpack.take_wire(encoder);
+                if !wire.is_empty() {
+                    send.send_data(Frame::Raw(wire))
+                        .map_err(|error| self.handle_critical_stream_error(error))?;
+                    // Re-poll even when no more input arrives to flush queued bytes.
+                    cx.waker().wake_by_ref();
+                }
+            }
+        }
+        Ok(())
     }
 
     fn handle_critical_stream_error(&mut self, error: StreamErrorIncoming) -> ConnectionError {
@@ -845,6 +951,7 @@ where
 pub struct RequestStream<S, B> {
     pub(super) stream: FrameStream<S, B>,
     pub(super) trailers: Option<Bytes>,
+    recv_guard: Option<qpack::state::DecodeGuard>,
     pub(super) conn_state: Arc<SharedState>,
     pub(super) max_field_section_size: u64,
     send_grease_frame: bool,
@@ -857,12 +964,20 @@ impl<S, B> RequestStream<S, B> {
         max_field_section_size: u64,
         conn_state: Arc<SharedState>,
         grease: bool,
-    ) -> Self {
+    ) -> Self
+    where
+        S: quic::RecvStream,
+    {
+        let recv_guard = Some(qpack::state::DecodeGuard {
+            shared: conn_state.clone(),
+            id: stream.id().into_inner(),
+        });
         Self {
             stream,
             conn_state,
             max_field_section_size,
             trailers: None,
+            recv_guard,
             send_grease_frame: grease,
         }
     }
@@ -945,7 +1060,7 @@ where
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<HeaderMap>, StreamError>> {
-        let mut trailers = if let Some(encoded) = self.trailers.take() {
+        let trailers = if let Some(encoded) = self.trailers.take() {
             encoded
         } else {
             match ready!(self.stream.poll_next(cx)) {
@@ -1021,27 +1136,33 @@ where
             }
         }
 
-        let qpack::Decoded { fields, .. } =
-            match qpack::decode_stateless(&mut trailers, self.max_field_section_size) {
-                //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
-                //# An HTTP/3 implementation MAY impose a limit on the maximum size of
-                //# the message header it will accept on an individual HTTP message.
-                Err(qpack::DecoderError::HeaderTooLong(cancel_size)) => {
-                    return Poll::Ready(Err(StreamError::HeaderTooBig {
-                        actual_size: cancel_size,
-                        max_size: self.max_field_section_size,
-                    }));
-                }
-                Ok(decoded) => decoded,
-                Err(_e) => {
-                    return Poll::Ready(Err(self.handle_connection_error_on_stream(
-                        InternalConnectionError {
-                            code: Code::QPACK_DECOMPRESSION_FAILED,
-                            message: "Failed to decode trailers".to_string(),
-                        },
-                    )))
-                }
-            };
+        let decoded = self.conn_state.qpack.poll_decode(
+            self.stream.id().into_inner(),
+            &trailers,
+            self.max_field_section_size,
+            cx,
+        );
+        let qpack::Decoded { fields, .. } = match decoded {
+            Poll::Pending => {
+                self.trailers = Some(trailers);
+                return Poll::Pending;
+            }
+            Poll::Ready(Ok(decoded)) => decoded,
+            Poll::Ready(Err(qpack::DecoderError::HeaderTooLong(actual_size))) => {
+                return Poll::Ready(Err(StreamError::HeaderTooBig {
+                    actual_size,
+                    max_size: self.max_field_section_size,
+                }))
+            }
+            Poll::Ready(Err(error)) => {
+                return Poll::Ready(Err(self.handle_connection_error_on_stream(
+                    InternalConnectionError::new(
+                        Code::QPACK_DECOMPRESSION_FAILED,
+                        error.to_string(),
+                    ),
+                )))
+            }
+        };
 
         Poll::Ready(Ok(Some(
             Header::try_from(fields)
@@ -1088,12 +1209,23 @@ where
         //# converted to lowercase prior to their encoding.
         let mut block = BytesMut::new();
 
-        let mem_size =
-            qpack::encode_stateless(&mut block, Header::trailer(trailers)).map_err(|_e| {
-                self.handle_connection_error_on_stream(InternalConnectionError {
-                    code: Code::H3_INTERNAL_ERROR,
-                    message: "Failed to encode trailers".to_string(),
-                })
+        let headers = Header::trailer(trailers);
+        let sensitive = headers.is_sensitive();
+        let mem_size = self
+            .conn_state
+            .qpack
+            .encode(
+                self.stream.send_id().into_inner(),
+                &mut block,
+                headers,
+                sensitive,
+                self.settings().max_field_section_size,
+            )
+            .map_err(|error| {
+                self.handle_connection_error_on_stream(InternalConnectionError::new(
+                    Code::H3_INTERNAL_ERROR,
+                    error.to_string(),
+                ))
             })?;
 
         let max_mem_size = self.settings().max_field_section_size;
@@ -1168,6 +1300,7 @@ where
             RequestStream {
                 stream: send,
                 trailers: None,
+                recv_guard: None,
                 conn_state: self.conn_state.clone(),
                 max_field_section_size: 0,
                 send_grease_frame: self.send_grease_frame,
@@ -1175,6 +1308,7 @@ where
             RequestStream {
                 stream: recv,
                 trailers: self.trailers,
+                recv_guard: self.recv_guard,
                 conn_state: self.conn_state,
                 max_field_section_size: self.max_field_section_size,
                 send_grease_frame: self.send_grease_frame,

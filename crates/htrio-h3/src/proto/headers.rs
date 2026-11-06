@@ -22,6 +22,16 @@ pub struct Header {
 
 #[allow(clippy::len_without_is_empty)]
 impl Header {
+    pub(crate) fn is_sensitive(&self) -> bool {
+        self.fields.iter().any(|(name, value)| {
+            value.is_sensitive()
+                || matches!(
+                    name.as_str(),
+                    "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+                )
+        })
+    }
+
     /// Creates a new `Header` frame data suitable for sending a request
     pub fn request(
         method: Method,

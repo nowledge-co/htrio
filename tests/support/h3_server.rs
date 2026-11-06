@@ -67,7 +67,9 @@ impl Server {
                 sessions.spawn(async move {
                     let connection = incoming.await.unwrap();
                     accepted.fetch_add(1, Ordering::SeqCst);
-                    let mut server = h3::server::builder().build(h3_quinn::Connection::new(connection)).await.unwrap();
+                    let mut builder = h3::server::builder();
+                    builder.qpack(4096, 16);
+                    let mut server = builder.build(h3_quinn::Connection::new(connection)).await.unwrap();
                     let mut streams = JoinSet::new();
                     loop {
                         tokio::select! {

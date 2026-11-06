@@ -12,6 +12,7 @@ use crate::{config::Settings, error::internal_error::ErrorOrigin};
 #[derive(Debug)]
 /// This struct represents the shared state of the h3 connection and the stream structs
 pub struct SharedState {
+    pub(crate) qpack: std::sync::Arc<crate::qpack::state::State>,
     pub(crate) priorities:
         std::sync::Mutex<std::collections::BTreeMap<u64, crate::priority::Priority>>,
     /// The settings, sent by the peer
@@ -27,6 +28,7 @@ pub struct SharedState {
 impl Default for SharedState {
     fn default() -> Self {
         Self {
+            qpack: Default::default(),
             priorities: Default::default(),
             settings: OnceLock::new(),
             connection_error: OnceLock::new(),

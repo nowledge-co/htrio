@@ -284,6 +284,8 @@ struct Config {
     #[cfg(feature = "http3")]
     h3_send_grease: Option<bool>,
     #[cfg(feature = "http3")]
+    h3_qpack: (u64, u64),
+    #[cfg(feature = "http3")]
     alt_svc: bool,
     #[cfg(feature = "http3")]
     alt_svc_cache: Arc<crate::alt_svc::AltSvcCache>,
@@ -421,6 +423,8 @@ impl ClientBuilder {
                 #[cfg(feature = "http3")]
                 h3_send_grease: None,
                 #[cfg(feature = "http3")]
+                h3_qpack: (4096, 16),
+                #[cfg(feature = "http3")]
                 alt_svc: true,
                 #[cfg(feature = "http3")]
                 alt_svc_cache: Arc::new(crate::alt_svc::AltSvcCache::new()),
@@ -534,6 +538,7 @@ impl ClientBuilder {
                  h3_max_field_section_size,
                  h3_max_frame_size,
                  h3_send_grease,
+                 h3_qpack,
                  local_address,
                  http_version_pref: &HttpVersionPref| {
                     let mut transport_config = quic_transport_config.unwrap_or_default();
@@ -564,6 +569,7 @@ impl ClientBuilder {
                     let mut h3_client_config = H3ClientConfig::default();
                     h3_client_config.tls_info = tls_info;
                     h3_client_config.verifier = verifier;
+                    h3_client_config.qpack = h3_qpack;
 
                     if let Some(max_field_section_size) = h3_max_field_section_size {
                         h3_client_config.max_field_section_size = Some(max_field_section_size);
@@ -742,6 +748,7 @@ impl ClientBuilder {
                             config.h3_max_field_section_size,
                             config.h3_max_frame_size,
                             config.h3_send_grease,
+                            config.h3_qpack,
                             config.local_address,
                             &config.http_version_pref,
                         )?;
@@ -935,6 +942,7 @@ impl ClientBuilder {
                             config.h3_max_field_section_size,
                             config.h3_max_frame_size,
                             config.h3_send_grease,
+                            config.h3_qpack,
                             config.local_address,
                             &config.http_version_pref,
                         )?;
@@ -2585,6 +2593,16 @@ impl ClientBuilder {
     #[cfg_attr(docsrs, doc(cfg(feature = "http3")))]
     pub fn http3_max_frame_size(mut self, bytes: u64) -> ClientBuilder {
         self.config.h3_max_frame_size = Some(bytes);
+        self
+    }
+
+    /// Bound dynamic QPACK compression (default: 4096 bytes and 16 blocked streams).
+    ///
+    /// Capacity is capped at 64 KiB, blocked streams at 64. A zero capacity
+    /// disables dynamic compression. Sensitive fields use stateless sections.
+    #[cfg(feature = "http3")]
+    pub fn http3_qpack(mut self, capacity: u64, blocked_streams: u64) -> ClientBuilder {
+        self.config.h3_qpack = (capacity.min(65536), blocked_streams.min(64));
         self
     }
 

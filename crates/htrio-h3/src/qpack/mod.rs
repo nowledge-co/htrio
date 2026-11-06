@@ -1,8 +1,10 @@
 pub use self::{
-    decoder::{decode_stateless, Decoded, DecoderError},
+    decoder::{Decoded, DecoderError},
     encoder::{encode_stateless, EncoderError},
     field::HeaderField,
 };
+
+pub(crate) mod state;
 
 mod block;
 mod dynamic;
@@ -12,6 +14,8 @@ mod static_;
 mod stream;
 mod vas;
 
+#[cfg(test)]
+pub use decoder::decode_stateless;
 mod decoder;
 mod encoder;
 

@@ -28,7 +28,6 @@ use quic::StreamId;
 
 use crate::{
     proto::{frame::Frame, headers::Header},
-    qpack,
     quic::SendStream as _,
     stream::{self},
 };
@@ -124,12 +123,24 @@ where
         let headers = Header::response(status, headers);
 
         let mut block = BytesMut::new();
-        let mem_size = qpack::encode_stateless(&mut block, headers).map_err(|_e| {
-            self.handle_connection_error_on_stream(InternalConnectionError {
-                code: Code::H3_INTERNAL_ERROR,
-                message: "Failed to encode headers".to_string(),
-            })
-        })?;
+        let sensitive = headers.is_sensitive();
+        let mem_size = self
+            .inner
+            .conn_state
+            .qpack
+            .encode(
+                self.inner.stream.send_id().into_inner(),
+                &mut block,
+                headers,
+                sensitive,
+                self.inner.settings().max_field_section_size,
+            )
+            .map_err(|_e| {
+                self.handle_connection_error_on_stream(InternalConnectionError {
+                    code: Code::H3_INTERNAL_ERROR,
+                    message: "Failed to encode headers".to_string(),
+                })
+            })?;
 
         let max_mem_size = self.inner.settings().max_field_section_size;
 
