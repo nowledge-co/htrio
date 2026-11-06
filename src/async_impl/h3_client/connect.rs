@@ -22,6 +22,7 @@ type H3Connection = (
     SendRequest<OpenStreams, Bytes>,
     Endpoint,
     quinn::Connection,
+    super::session::EarlyData,
 );
 
 const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
@@ -44,6 +45,7 @@ pub(crate) struct H3ClientConfig {
     pub(crate) send_grease: Option<bool>,
     pub(crate) qpack: (u64, u64),
     pub(crate) coalescing: bool,
+    pub(crate) partition_sessions: bool,
 }
 
 impl Default for H3ClientConfig {
@@ -56,6 +58,7 @@ impl Default for H3ClientConfig {
             send_grease: None,
             qpack: (4096, 16),
             coalescing: false,
+            partition_sessions: true,
         }
     }
 }
@@ -69,6 +72,8 @@ pub(crate) struct H3Connector {
     transport: Arc<TransportConfig>,
     client_config: H3ClientConfig,
     local_addr: Option<IpAddr>,
+    routes:
+        Arc<Mutex<std::collections::HashMap<super::pool::Key, Arc<super::session::RouteState>>>>,
     services: Arc<
         Mutex<
             std::collections::HashMap<
@@ -102,6 +107,7 @@ impl H3Connector {
             client_config,
             local_addr,
             services: Default::default(),
+            routes: Default::default(),
         })
     }
 
@@ -193,7 +199,8 @@ impl H3Connector {
         destination: &http::uri::Authority,
         connection: &quinn::Connection,
     ) -> bool {
-        if !self.client_config.coalescing
+        if connection.is_handshaking()
+            || !self.client_config.coalescing
             || self.tls.client_auth_cert_resolver.has_certs()
             || self
                 .service(origin, destination)
@@ -236,12 +243,49 @@ impl H3Connector {
             .is_ok()
     }
 
+    fn route(
+        &self,
+        origin: &Uri,
+        alternative: &http::uri::Authority,
+        proxy: Option<&crate::proxy::Intercepted>,
+    ) -> Result<Arc<super::session::RouteState>, BoxError> {
+        let mut key = super::pool::extract_domain(origin)?;
+        key.2 = alternative.clone();
+        key.3 = proxy.map(super::pool::ProxyKey::new);
+        let mut routes = self.routes.lock().unwrap();
+        if let Some(route) = routes.get(&key) {
+            return Ok(route.clone());
+        }
+        if routes.len() >= 256 {
+            if let Some(oldest) = routes.keys().next().cloned() {
+                routes.remove(&oldest);
+            }
+        }
+        let route = Arc::new(super::session::RouteState::new(
+            &self.tls,
+            self.client_config.partition_sessions,
+        ));
+        routes.insert(key, route.clone());
+        Ok(route)
+    }
+
     fn route_config(
         &self,
         service: Option<&crate::dns::ServiceEndpoint>,
+        route: &super::session::RouteState,
     ) -> Result<ClientConfig, BoxError> {
+        let key = service.and_then(|service| service.ech_config_list.clone());
+        let mut cached = route.quic.lock().unwrap();
+        if let Some((previous, config)) = cached.as_ref().filter(|(previous, _)| previous == &key) {
+            let _ = previous;
+            return Ok(config.clone());
+        }
         let Some(ech) = service.and_then(|service| service.ech_config_list.as_ref()) else {
-            return Ok(self.quic_config.clone());
+            let mut config =
+                ClientConfig::new(Arc::new(QuicClientConfig::try_from(route.tls.clone())?));
+            config.transport_config(self.transport.clone());
+            *cached = Some((key, config.clone()));
+            return Ok(config);
         };
         let verifier = self
             .client_config
@@ -259,12 +303,13 @@ impl H3Connector {
                 .with_custom_certificate_verifier(verifier)
                 .with_client_cert_resolver(self.tls.client_auth_cert_resolver.clone());
         tls.alpn_protocols = vec![b"h3".to_vec()];
-        tls.resumption = self.tls.resumption.clone();
+        tls.resumption = route.tls.resumption.clone();
         tls.key_log = self.tls.key_log.clone();
         tls.enable_early_data = self.tls.enable_early_data;
         tls.max_fragment_size = self.tls.max_fragment_size;
         let mut config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls)?));
         config.transport_config(self.transport.clone());
+        *cached = Some((key, config.clone()));
         Ok(config)
     }
 
@@ -273,6 +318,8 @@ impl H3Connector {
         origin: Uri,
         alternative: http::uri::Authority,
         proxy: Option<&crate::proxy::Intercepted>,
+        allow_early: bool,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<H3Connection, BoxError> {
         let server_name = origin
             .host()
@@ -284,7 +331,8 @@ impl H3Connector {
             .trim_start_matches('[')
             .trim_end_matches(']');
         let service = self.service(&origin, &alternative);
-        let quic_config = self.route_config(service.as_ref())?;
+        let route = self.route(&origin, &alternative, proxy)?;
+        let quic_config = self.route_config(service.as_ref(), &route)?;
         if let Some(proxy) = proxy {
             #[cfg(feature = "socks")]
             return self
@@ -294,6 +342,9 @@ impl H3Connector {
                     alternative.port_u16(),
                     server_name,
                     quic_config,
+                    route,
+                    allow_early,
+                    deadline,
                 )
                 .await;
             #[cfg(not(feature = "socks"))]
@@ -320,7 +371,15 @@ impl H3Connector {
         };
 
         // The destination comes from Alt-Svc; TLS still authenticates the origin.
-        self.remote_connect(addrs, server_name, quic_config).await
+        self.remote_connect(
+            addrs,
+            server_name,
+            quic_config,
+            route,
+            allow_early,
+            deadline,
+        )
+        .await
     }
 
     pub(crate) fn tls_info(&self) -> bool {
@@ -332,6 +391,9 @@ impl H3Connector {
         // bind on the new network without migrating a SOCKS association.
         self.endpoint.lock().unwrap().take();
         self.services.lock().unwrap().clear();
+        for route in self.routes.lock().unwrap().values() {
+            route.quic.lock().unwrap().take();
+        }
     }
 
     fn endpoint(&self) -> Result<Endpoint, BoxError> {
@@ -377,6 +439,9 @@ impl H3Connector {
         port: Option<u16>,
         server_name: &str,
         quic_config: ClientConfig,
+        route: Arc<super::session::RouteState>,
+        allow_early: bool,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<H3Connection, BoxError> {
         use super::socks::Target;
         let targets =
@@ -394,11 +459,20 @@ impl H3Connector {
             let connector = self.clone();
             let proxy = proxy.clone();
             let quic_config = quic_config.clone();
+            let route = route.clone();
             let server_name = server_name.to_owned();
             attempts.spawn(async move {
                 tokio::time::sleep(HAPPY_EYEBALLS_DELAY * index as u32).await;
                 connector
-                    .connect_socks_target(&proxy, target, &server_name, quic_config)
+                    .connect_socks_target(
+                        &proxy,
+                        target,
+                        &server_name,
+                        quic_config,
+                        route,
+                        allow_early,
+                        deadline,
+                    )
                     .await
             });
         }
@@ -420,6 +494,9 @@ impl H3Connector {
         target: super::socks::Target,
         server_name: &str,
         quic_config: ClientConfig,
+        route: Arc<super::session::RouteState>,
+        allow_early: bool,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<H3Connection, BoxError> {
         let (socket, peer) = super::socks::SocksSocket::connect(
             proxy,
@@ -435,12 +512,12 @@ impl H3Connector {
             Arc::new(quinn::TokioRuntime),
         )?;
         endpoint.set_default_client_config(quic_config);
-        let connection = tokio::select! {
-            result = endpoint.connect(peer, server_name)? => result?,
+        let (connection, early) = tokio::select! {
+            result = super::session::EarlyData::connect(endpoint.connect(peer, server_name)?, route, allow_early, deadline) => result?,
             _ = socket.closed() => return Err("SOCKS5 UDP association closed during handshake".into()),
         };
         let monitored = connection.clone();
-        let result = Self::build_h3(&endpoint, connection, &self.client_config).await;
+        let result = Self::build_h3(&endpoint, connection, &self.client_config, early).await;
         if result.is_err() {
             monitored.close(0_u32.into(), b"HTTP/3 setup failed");
             return result;
@@ -459,6 +536,9 @@ impl H3Connector {
         addrs: Vec<SocketAddr>,
         server_name: &str,
         quic_config: ClientConfig,
+        route: Arc<super::session::RouteState>,
+        allow_early: bool,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<H3Connection, BoxError> {
         let endpoint = self.endpoint()?;
         let mut ipv6 = addrs.iter().copied().filter(|addr| addr.is_ipv6());
@@ -490,13 +570,15 @@ impl H3Connector {
             let endpoint = endpoint.clone();
             let config = self.client_config.clone();
             let quic_config = quic_config.clone();
+            let route = route.clone();
             let server_name = server_name.to_owned();
             attempts.spawn(async move {
                 tokio::time::sleep(HAPPY_EYEBALLS_DELAY * index as u32).await;
-                let connection = endpoint
-                    .connect_with(quic_config, address, &server_name)?
-                    .await?;
-                Self::build_h3(&endpoint, connection, &config).await
+                let connecting = endpoint.connect_with(quic_config, address, &server_name)?;
+                let (connection, early) =
+                    super::session::EarlyData::connect(connecting, route, allow_early, deadline)
+                        .await?;
+                Self::build_h3(&endpoint, connection, &config, early).await
             });
         }
         let mut last: BoxError = "no compatible addresses to connect to".into();
@@ -514,9 +596,16 @@ impl H3Connector {
         endpoint: &Endpoint,
         connection: quinn::Connection,
         config: &H3ClientConfig,
+        early: super::session::EarlyData,
     ) -> Result<H3Connection, BoxError> {
         let mut builder = h3::client::builder();
         builder.enable_extended_connect(true);
+        if early.attempted {
+            let remembered = *early.route.settings.lock().unwrap();
+            if let Some(settings) = remembered {
+                builder.remembered_settings(settings);
+            }
+        }
         builder.qpack(config.qpack.0, config.qpack.1);
         if let Some(size) = config.max_field_section_size {
             builder.max_field_section_size(size);
@@ -528,6 +617,6 @@ impl H3Connector {
             builder.send_grease(grease);
         }
         let (driver, sender) = builder.build(Connection::new(connection.clone())).await?;
-        Ok((driver, sender, endpoint.clone(), connection))
+        Ok((driver, sender, endpoint.clone(), connection, early))
     }
 }

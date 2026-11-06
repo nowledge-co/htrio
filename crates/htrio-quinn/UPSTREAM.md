@@ -17,3 +17,6 @@ The upstream MIT and Apache-2.0 licenses are preserved.
 The package is named `htrio-quinn`; its Rust library name is unchanged.
 Sibling path dependencies keep protocol and UDP types consistent for downstream
 Git/path consumers. Changes are maintained and pushed with htrio.
+
+- Expose connection handshake state and stream priority updates for HTTP/3
+  early-data policy and request reprioritization.

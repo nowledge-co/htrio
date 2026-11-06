@@ -100,3 +100,11 @@ defaults. Full Mem application integration is a separate qualification.
   Pool locks now carry a network generation so cancelled old attempts cannot
   remove or populate a new network's pool. Tests cover opted-out reuse, accepted
   multi-SAN reuse, rejected SANs, and an old/new generation lock race.
+
+- `23542a7`: all seven exact-commit CI jobs passed, including dynamic QPACK,
+  coalescing isolation, frame/header bounds, and network generation regressions.
+- Early-data batch: route-scoped session caches and remembered peer SETTINGS,
+  actual Quinn 0-RTT opening, acceptance/deadline barriers, credential/body policy,
+  a single confirmed rejection/425 retry, and reduced-SETTINGS rejection. A local
+  delayed UDP relay exercises data dispatched before confirmation, TLS rejection,
+  HTTP 425, unsafe request gating, and changed server SETTINGS.

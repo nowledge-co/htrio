@@ -22,6 +22,8 @@ pub struct ConnectionInfo {
     pub(crate) connect_time: Duration,
     pub(crate) tls_info: bool,
     pub(crate) coalesced: bool,
+    pub(crate) early: crate::async_impl::h3_client::session::EarlyData,
+    pub(crate) early_data_used: bool,
 }
 
 impl ConnectionInfo {
@@ -48,6 +50,18 @@ impl ConnectionInfo {
     /// Packet, byte, congestion, loss, and path MTU counters.
     pub fn stats(&self) -> ConnectionStats {
         self.connection.stats()
+    }
+    /// Whether early data was attempted and accepted on this connection.
+    pub fn early_data_status(&self) -> EarlyDataStatus {
+        self.early.status()
+    }
+    /// Whether this request was dispatched before TLS confirmation.
+    pub fn used_early_data(&self) -> bool {
+        self.early_data_used
+    }
+    /// Content-free counters for the route's owned TLS session cache.
+    pub fn session_stats(&self) -> SessionStats {
+        self.early.stats()
     }
     /// Dynamic QPACK insertion and blocked-section counters.
     pub fn qpack_stats(&self) -> h3::QpackStats {
@@ -105,3 +119,29 @@ impl RequestPriority {
 
 /// Certificate verification policy used when rebuilding preconfigured TLS for ECH.
 pub use rustls::client::danger::ServerCertVerifier as CertificateVerifier;
+
+/// TLS early-data acceptance state for a QUIC connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EarlyDataStatus {
+    /// This connection completed a regular TLS handshake.
+    NotAttempted,
+    /// An early connection is awaiting server confirmation.
+    Pending,
+    /// The server accepted the early connection.
+    Accepted,
+    /// The server rejected early data; a fresh confirmed connection is required.
+    Rejected,
+}
+
+/// Cumulative route-scoped resumption counters; no session secrets are exposed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SessionStats {
+    /// Tickets in htrio's owned cache (preconfigured external stores are not counted).
+    pub cached_tickets: usize,
+    /// Whether authenticated peer SETTINGS are available for resumption.
+    pub settings_cached: bool,
+    /// Connections that actually obtained 0-RTT transport keys.
+    pub early_attempts: usize,
+    /// Early connections rejected by the peer or terminated during establishment.
+    pub early_rejections: usize,
+}

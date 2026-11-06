@@ -594,6 +594,11 @@ impl Connection {
             .peer_identity()
     }
 
+    /// Whether TLS establishment is still in progress.
+    pub fn is_handshaking(&self) -> bool {
+        self.0.state.lock("is_handshaking").inner.is_handshaking()
+    }
+
     /// A stable identifier for this connection
     ///
     /// Peer addresses and connection IDs can change, but this value will remain

@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +20,8 @@ pub struct Server {
     pub address: std::net::SocketAddr,
     pub certificate: CertificateDer<'static>,
     pub connections: Arc<AtomicUsize>,
+    pub tls: rustls::ServerConfig,
+    qpack_capacity: Arc<AtomicU64>,
     endpoint: quinn::Endpoint,
     task: JoinHandle<()>,
     goaway: mpsc::UnboundedSender<oneshot::Sender<()>>,
@@ -45,8 +47,9 @@ impl Server {
         .with_single_cert(vec![certificate.clone()], key)
         .unwrap();
         tls.alpn_protocols = vec![b"h3".to_vec()];
+        tls.max_early_data_size = u32::MAX;
         let configuration = quinn::ServerConfig::with_crypto(Arc::new(
-            quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap(),
+            quinn::crypto::rustls::QuicServerConfig::try_from(tls.clone()).unwrap(),
         ));
         let endpoint =
             quinn::Endpoint::server(configuration, "127.0.0.1:0".parse().unwrap()).unwrap();
@@ -56,6 +59,8 @@ impl Server {
         let accepted = connections.clone();
         let handler: Handler = Arc::new(move |request, stream| Box::pin(handler(request, stream)));
         let (goaway, goaway_rx) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
+        let qpack_capacity = Arc::new(AtomicU64::new(4096));
+        let protocol_capacity = qpack_capacity.clone();
         let task = tokio::spawn(async move {
             // The first connection accepts the explicit GOAWAY control command.
             let mut control = Some(goaway_rx);
@@ -64,12 +69,13 @@ impl Server {
                 let handler = handler.clone();
                 let accepted = accepted.clone();
                 let mut control = control.take();
+                let protocol_capacity = protocol_capacity.clone();
                 sessions.spawn(async move {
-                    let connection = incoming.await.unwrap();
+                    let Ok(connection) = incoming.await else { return; };
                     accepted.fetch_add(1, Ordering::SeqCst);
                     let mut builder = h3::server::builder();
-                    builder.qpack(4096, 16);
-                    let mut server = builder.build(h3_quinn::Connection::new(connection)).await.unwrap();
+                    builder.qpack(protocol_capacity.load(Ordering::SeqCst), 16);
+                    let Ok(mut server) = builder.build(h3_quinn::Connection::new(connection)).await else { return; };
                     let mut streams = JoinSet::new();
                     loop {
                         tokio::select! {
@@ -101,12 +107,27 @@ impl Server {
         });
         Self {
             address,
+            tls,
+            qpack_capacity,
             certificate,
             connections,
             endpoint,
             task,
             goaway,
         }
+    }
+
+    pub fn reject_early_data(&self) {
+        let mut tls = self.tls.clone();
+        tls.max_early_data_size = 0;
+        let config = quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap(),
+        ));
+        self.endpoint.set_server_config(Some(config));
+    }
+
+    pub fn set_qpack_capacity(&self, capacity: u64) {
+        self.qpack_capacity.store(capacity, Ordering::SeqCst);
     }
 
     pub fn client_builder(&self) -> htrio::ClientBuilder {

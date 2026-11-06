@@ -92,7 +92,8 @@ mod http3 {
                 .iter()
                 .find_map(|proxy| proxy.intercept(&origin));
             if self.prior_knowledge {
-                self.prepare(&origin, None, proxy.as_ref(), false).await?;
+                self.prepare_with_early(&origin, None, proxy.as_ref(), false, false)
+                    .await?;
             } else if self.discover && origin.scheme_str() == Some("https") {
                 let alternatives = self
                     .cache
@@ -106,7 +107,7 @@ mod http3 {
                     .collect::<Vec<_>>();
                 let mut failed = Vec::new();
                 if self
-                    .prepare_candidates(&origin, alternatives, proxy.as_ref(), &mut failed)
+                    .prepare_candidates(&origin, alternatives, proxy.as_ref(), &mut failed, false)
                     .await
                     .is_ok()
                 {
@@ -166,6 +167,8 @@ mod http3 {
                 return Err(error::request("HTTP/3 proxying requires SOCKS5 UDP"));
             }
 
+            let allow_early = super::super::h3_client::can_send_early(&request);
+
             if self.discover
                 && supports_http3
                 && self.client.is_some()
@@ -220,6 +223,7 @@ mod http3 {
                             alternatives,
                             proxy.as_ref(),
                             &mut failed,
+                            allow_early,
                         );
                         let tcp_connect = async {
                             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -320,7 +324,9 @@ mod http3 {
             }
 
             if forced {
-                let connection = self.prepare(&origin, None, proxy.as_ref(), false).await?;
+                let connection = self
+                    .prepare_with_early(&origin, None, proxy.as_ref(), false, allow_early)
+                    .await?;
                 *request.version_mut() = Version::HTTP_3;
                 let response = self
                     .dispatch(connection, request, &origin, None, proxy.as_ref(), false)
@@ -345,11 +351,18 @@ mod http3 {
             alternatives: Vec<crate::alt_svc::Alternative>,
             proxy: Option<&crate::proxy::Intercepted>,
             failed: &mut Vec<http::uri::Authority>,
+            allow_early: bool,
         ) -> Result<(PoolClient, crate::alt_svc::Alternative), BoxError> {
             let mut last: BoxError = "no available HTTP/3 alternative".into();
             for alternative in alternatives {
                 match self
-                    .prepare(origin, Some(alternative.authority.clone()), proxy, true)
+                    .prepare_with_early(
+                        origin,
+                        Some(alternative.authority.clone()),
+                        proxy,
+                        true,
+                        allow_early,
+                    )
                     .await
                 {
                     Ok(connection) => return Ok((connection, alternative)),
@@ -385,19 +398,20 @@ mod http3 {
                     proxy,
                 );
                 connection = self
-                    .prepare(origin, alternative.clone(), proxy, automatic)
+                    .prepare_with_early(origin, alternative.clone(), proxy, automatic, false)
                     .await
                     .map_err(|error| Box::new(error) as BoxError)?;
             }
             unreachable!("bounded reconnect returns a result")
         }
 
-        async fn prepare(
+        async fn prepare_with_early(
             &mut self,
             origin: &Uri,
             alternative: Option<http::uri::Authority>,
             proxy: Option<&crate::proxy::Intercepted>,
             automatic: bool,
+            allow_early: bool,
         ) -> crate::Result<PoolClient> {
             let client = self.client.as_mut().ok_or_else(|| {
                 error::request("HTTP/3 requires a rustls configuration with TLS 1.3 support")
@@ -412,7 +426,9 @@ mod http3 {
             } else {
                 self.connect_timeout
             };
-            let connect = client.prepare(origin, alternative, proxy);
+            let deadline =
+                timeout.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
+            let connect = client.prepare(origin, alternative, proxy, allow_early, deadline);
             let result = match timeout {
                 Some(timeout) => tokio::time::timeout(timeout, connect)
                     .await

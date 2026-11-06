@@ -1,5 +1,7 @@
 #![cfg(feature = "http3")]
 
+#[path = "support/delayed_udp.rs"]
+mod delayed_udp;
 #[path = "support/h3_server.rs"]
 mod h3_server;
 
@@ -584,4 +586,227 @@ async fn dynamic_qpack_headers_and_trailers_share_bounded_connection_state() {
     assert!(stats.encoded_inserts > 0);
     assert!(stats.decoded_inserts > 0);
     assert_eq!(stats.blocked_sections, 0);
+}
+
+async fn prime_resumption(client: &htrio::Client) -> htrio::http3::ConnectionInfo {
+    let response = client.get("https://origin.test/seed").send().await.unwrap();
+    let info = response
+        .extensions()
+        .get::<htrio::http3::ConnectionInfo>()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        info.early_data_status(),
+        htrio::http3::EarlyDataStatus::NotAttempted
+    );
+    response.bytes().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let stats = info.session_stats();
+            if stats.cached_tickets > 0 && stats.settings_cached {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    info
+}
+
+#[tokio::test]
+async fn opt_in_early_data_dispatches_a_safe_request_before_confirmation() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let requests = observed.clone();
+    let server = Server::new(move |request, mut stream| {
+        let requests = requests.clone();
+        async move {
+            requests
+                .lock()
+                .unwrap()
+                .push(request.headers().contains_key("early-data"));
+            stream.send_response(Response::new(())).await.unwrap();
+            stream.finish().await.unwrap();
+        }
+    })
+    .await;
+    let relay = delayed_udp::Relay::new(server.address, Duration::from_millis(75)).await;
+    let client = server
+        .client_builder()
+        .resolve("origin.test", relay.address)
+        .tls_early_data(true)
+        .connect_timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let first = prime_resumption(&client).await;
+    client.network_changed();
+    let response = client
+        .get("https://origin.test/early")
+        .send()
+        .await
+        .unwrap();
+    let info = response
+        .extensions()
+        .get::<htrio::http3::ConnectionInfo>()
+        .unwrap();
+    assert_ne!(info.id(), first.id());
+    assert_eq!(
+        info.early_data_status(),
+        htrio::http3::EarlyDataStatus::Accepted
+    );
+    assert!(info.used_early_data());
+    assert_eq!(info.session_stats().early_attempts, 1);
+    response.bytes().await.unwrap();
+    assert_eq!(*observed.lock().unwrap(), [false, true]);
+}
+
+#[tokio::test]
+async fn rejected_early_data_recovers_once_without_replaying_an_executed_request() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let server = Server::new(move |request, mut stream| {
+        let calls = observed.clone();
+        async move {
+            assert!(!request.headers().contains_key("early-data"));
+            calls.fetch_add(1, Ordering::SeqCst);
+            stream.send_response(Response::new(())).await.unwrap();
+            stream.finish().await.unwrap();
+        }
+    })
+    .await;
+    let relay = delayed_udp::Relay::new(server.address, Duration::from_millis(75)).await;
+    let client = server
+        .client_builder()
+        .resolve("origin.test", relay.address)
+        .tls_early_data(true)
+        .connect_timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let _first = prime_resumption(&client).await;
+    server.reject_early_data();
+    client.network_changed();
+    let response = client
+        .get("https://origin.test/rejected")
+        .send()
+        .await
+        .unwrap();
+    let info = response
+        .extensions()
+        .get::<htrio::http3::ConnectionInfo>()
+        .unwrap();
+    assert!(!info.used_early_data());
+    assert_eq!(info.session_stats().early_attempts, 1);
+    assert_eq!(info.session_stats().early_rejections, 1);
+    response.bytes().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn too_early_status_retries_once_after_a_confirmed_handshake() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let requests = observed.clone();
+    let server = Server::new(move |request, mut stream| {
+        let requests = requests.clone();
+        async move {
+            let early = request.headers().contains_key("early-data");
+            requests.lock().unwrap().push(early);
+            stream
+                .send_response(
+                    Response::builder()
+                        .status(if early { 425 } else { 200 })
+                        .body(())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            stream.finish().await.unwrap();
+        }
+    })
+    .await;
+    let relay = delayed_udp::Relay::new(server.address, Duration::from_millis(75)).await;
+    let client = server
+        .client_builder()
+        .resolve("origin.test", relay.address)
+        .tls_early_data(true)
+        .connect_timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let _first = prime_resumption(&client).await;
+    client.network_changed();
+    let response = client.get("https://origin.test/425").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response
+        .extensions()
+        .get::<htrio::http3::ConnectionInfo>()
+        .unwrap()
+        .used_early_data());
+    response.bytes().await.unwrap();
+    assert_eq!(*observed.lock().unwrap(), [false, true, false]);
+}
+
+#[tokio::test]
+async fn uploads_and_credentials_use_confirmed_handshakes_even_when_early_data_is_enabled() {
+    let server = Server::new(|request, mut stream| async move {
+        assert!(!request.headers().contains_key("early-data"));
+        while stream.recv_data().await.unwrap().is_some() {}
+        stream.send_response(Response::new(())).await.unwrap();
+        stream.finish().await.unwrap();
+    })
+    .await;
+    let relay = delayed_udp::Relay::new(server.address, Duration::from_millis(75)).await;
+    let client = server
+        .client_builder()
+        .resolve("origin.test", relay.address)
+        .tls_early_data(true)
+        .connect_timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let _first = prime_resumption(&client).await;
+    for method in [http::Method::POST, http::Method::GET] {
+        client.network_changed();
+        let response = client
+            .request(method, "https://origin.test/confirmed")
+            .bearer_auth("credential")
+            .body("upload")
+            .send()
+            .await
+            .unwrap();
+        let info = response
+            .extensions()
+            .get::<htrio::http3::ConnectionInfo>()
+            .unwrap();
+        assert!(!info.used_early_data());
+        assert_eq!(info.session_stats().early_attempts, 0);
+        response.bytes().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn accepted_early_data_rejects_reduced_server_settings() {
+    let server = Server::new(|_, mut stream| async move {
+        let _ = stream.send_response(Response::new(())).await;
+        let _ = stream.finish().await;
+    })
+    .await;
+    let relay = delayed_udp::Relay::new(server.address, Duration::from_millis(75)).await;
+    let client = server
+        .client_builder()
+        .resolve("origin.test", relay.address)
+        .tls_early_data(true)
+        .connect_timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let _first = prime_resumption(&client).await;
+    server.set_qpack_capacity(0);
+    client.network_changed();
+    let error = client
+        .get("https://origin.test/reduced-settings")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("H3_SETTINGS_ERROR"),
+        "{error:?}"
+    );
 }

@@ -9,6 +9,7 @@
 pub(crate) mod connect;
 pub(crate) mod dns;
 mod pool;
+pub(crate) mod session;
 #[cfg(feature = "socks")]
 mod socks;
 
@@ -20,7 +21,7 @@ use log::trace;
 use pool::Pool;
 use std::time::Duration;
 
-pub(crate) use pool::PoolClient;
+pub(crate) use pool::{can_send_early, PoolClient};
 
 #[derive(Clone)]
 pub(crate) struct H3Client {
@@ -52,15 +53,20 @@ impl H3Client {
         origin: &Uri,
         alternative: Option<Authority>,
         proxy: Option<&crate::proxy::Intercepted>,
+        allow_early: bool,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<PoolClient, BoxError> {
         let mut key = pool::extract_domain(origin)?;
         if let Some(alternative) = alternative {
             key.2 = alternative;
         }
         key.3 = proxy.map(pool::ProxyKey::new);
-        if let Some(client) = self.pool.try_pool(&key) {
-            trace!("getting HTTP/3 client from pool with key {key:?}");
-            return Ok(client);
+        if let Some(mut client) = self.pool.try_pool(&key) {
+            if allow_early || client.info.early.accepted().await {
+                trace!("getting HTTP/3 client from pool with key {key:?}");
+                return Ok(client);
+            }
+            self.pool.remove(&key);
         }
         let may_coalesce = {
             let health = self.health.lock().unwrap();
@@ -92,8 +98,10 @@ impl H3Client {
         let started = std::time::Instant::now();
         let direct = proxy.is_none();
         let destination = pool::domain_as_uri(key.clone());
-        let (driver, tx, endpoint, connection) =
-            self.connector.connect(destination, key.2, proxy).await?;
+        let (driver, tx, endpoint, connection, early) = self
+            .connector
+            .connect(destination, key.2, proxy, allow_early, deadline)
+            .await?;
         Ok(self.pool.new_connection(
             lock,
             driver,
@@ -103,6 +111,7 @@ impl H3Client {
             direct,
             started.elapsed(),
             self.connector.tls_info(),
+            early,
         ))
     }
 

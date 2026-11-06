@@ -260,20 +260,37 @@ impl Pool {
         direct: bool,
         connect_time: Duration,
         tls_info: bool,
+        early: super::session::EarlyData,
     ) -> PoolClient {
         let (close_tx, close_rx) = std::sync::mpsc::channel();
+        let mut confirmation = early.clone();
+        let transport = connection.clone();
         tokio::spawn(async move {
             let _endpoint = endpoint;
-            let e = future::poll_fn(|cx| driver.poll_close(cx)).await;
-            trace!("poll_close returned error {e:?}");
-            close_tx.send(e).ok();
+            // Rejected early streams have no reusable HTTP/3 state. Wait for
+            // acceptance before interpreting fresh SETTINGS against remembered limits.
+            if !confirmation.accepted().await {
+                transport.close(0_u32.into(), b"early data rejected");
+                return;
+            }
+            *confirmation.route.last_peer.lock().unwrap() = Some(transport.remote_address());
+            let error = future::poll_fn(|cx| {
+                let result = driver.poll_close(cx);
+                if let Some(settings) = driver.peer_settings() {
+                    *confirmation.route.settings.lock().unwrap() = Some(settings);
+                }
+                result
+            })
+            .await;
+            trace!("HTTP/3 driver closed: {error:?}");
+            close_tx.send(error).ok();
         });
 
         let mut inner = self.inner.lock().unwrap();
 
         // We clean up "connecting" here so we don't have to acquire the lock again.
         let (key, generation) = lock.forget();
-        let client = PoolClient::new(tx, connection, direct, connect_time, tls_info);
+        let client = PoolClient::new(tx, connection, direct, connect_time, tls_info, early);
         if generation != inner.generation {
             return client;
         }
@@ -348,6 +365,7 @@ impl PoolClient {
         direct: bool,
         connect_time: Duration,
         tls_info: bool,
+        early: super::session::EarlyData,
     ) -> Self {
         let info = crate::http3::ConnectionInfo {
             connection,
@@ -356,11 +374,63 @@ impl PoolClient {
             connect_time,
             tls_info,
             coalesced: false,
+            early,
+            early_data_used: false,
         };
         Self { inner: tx, info }
     }
 
     pub async fn send_request(
+        &mut self,
+        request: &mut Option<Request<Body>>,
+    ) -> Result<Response<ResponseBody>, BoxError> {
+        let safe = can_send_early(request.as_ref().expect("request is pending"));
+        if self.info.early.attempted
+            && (!safe || self.info.early.rejected())
+            && !self.info.early.accepted().await
+        {
+            return Err(super::session::EarlyDataRejected.into());
+        }
+        let early = safe && self.info.early.pending() && self.info.connection.is_handshaking();
+        let replay =
+            early.then(|| clone_empty_request(request.as_ref().expect("request is pending")));
+        if early {
+            request
+                .as_mut()
+                .unwrap()
+                .headers_mut()
+                .insert("early-data", http::HeaderValue::from_static("1"));
+        }
+        let mut result = self.send_request_inner(request).await;
+        if self.info.early.attempted && !self.info.early.accepted().await {
+            if let Some(replay) = replay {
+                *request = Some(replay);
+            }
+            return Err(super::session::EarlyDataRejected.into());
+        }
+        if early {
+            self.inner.wait_peer_settings().await?;
+        }
+        if early
+            && result
+                .as_ref()
+                .is_ok_and(|response| response.status() == http::StatusCode::TOO_EARLY)
+        {
+            *request = replay;
+            return Err(super::session::EarlyDataRejected.into());
+        }
+        if let Ok(response) = result.as_mut() {
+            if let Some(info) = response
+                .extensions_mut()
+                .get_mut::<crate::http3::ConnectionInfo>()
+            {
+                info.early_data_used = early;
+            }
+        }
+        result
+    }
+
+    async fn send_request_inner(
         &mut self,
         request: &mut Option<Request<Body>>,
     ) -> Result<Response<ResponseBody>, BoxError> {
@@ -471,6 +541,29 @@ impl PoolClient {
         };
         Ok(response.map(|_| crate::async_impl::body::boxed(body)))
     }
+}
+
+pub(crate) fn can_send_early(request: &Request<Body>) -> bool {
+    use http_body::Body as _;
+    matches!(*request.method(), http::Method::GET | http::Method::HEAD)
+        && request.body().is_end_stream()
+        && !request.headers().iter().any(|(name, value)| {
+            value.is_sensitive()
+                || matches!(
+                    name.as_str(),
+                    "authorization" | "proxy-authorization" | "cookie" | "x-api-key"
+                )
+        })
+}
+
+fn clone_empty_request(request: &Request<Body>) -> Request<Body> {
+    let mut replay = Request::new(Body::empty());
+    *replay.method_mut() = request.method().clone();
+    *replay.uri_mut() = request.uri().clone();
+    *replay.version_mut() = request.version();
+    *replay.headers_mut() = request.headers().clone();
+    *replay.extensions_mut() = request.extensions().clone();
+    replay
 }
 
 /// Cancelling a request or dropping its response also cancels source-body reads.
@@ -610,7 +703,7 @@ impl PoolConnection {
     }
 
     pub fn is_invalid(&self) -> bool {
-        if !self.client.inner.is_available() {
+        if self.client.info.early.rejected() || !self.client.inner.is_available() {
             return true;
         }
         match self.close_rx.lock().unwrap().try_recv() {
@@ -773,6 +866,34 @@ fn is_stop_sending(e: &h3::error::StreamError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn early_data_policy_excludes_bodies_and_credentials() {
+        let mut request = Request::new(Body::empty());
+        assert!(can_send_early(&request));
+        for name in [
+            "authorization",
+            "cookie",
+            "proxy-authorization",
+            "x-api-key",
+        ] {
+            request
+                .headers_mut()
+                .insert(name, http::HeaderValue::from_static("secret"));
+            assert!(!can_send_early(&request));
+            request.headers_mut().remove(name);
+        }
+        let mut sensitive = http::HeaderValue::from_static("secret");
+        sensitive.set_sensitive(true);
+        request.headers_mut().insert("x-custom", sensitive);
+        assert!(!can_send_early(&request));
+        request.headers_mut().clear();
+        *request.method_mut() = http::Method::POST;
+        assert!(!can_send_early(&request));
+        *request.method_mut() = http::Method::GET;
+        *request.body_mut() = Body::from("payload");
+        assert!(!can_send_early(&request));
+    }
+
     #[test]
     fn an_old_connecting_lock_cannot_release_a_new_network_attempt() {
         let pool = Pool::new(None);

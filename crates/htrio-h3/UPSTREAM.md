@@ -36,3 +36,7 @@ inspection feature; htrio's runtime dependency does not require it.
 
 When enabling dynamic compression in a low-level server, continue polling the
 connection while request resolver futures await encoder instructions.
+
+- Restore authenticated peer SETTINGS for accepted 0-RTT connections, reject
+  reductions, and provide bounded waiters for fresh peer settings. Compression
+  tables and stream identifiers always start fresh.

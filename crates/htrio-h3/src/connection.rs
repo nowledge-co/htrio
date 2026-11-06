@@ -254,6 +254,9 @@ where
         //# unidirectional streams required by mandatory extensions (such as the
         //# QPACK encoder and decoder streams) first, and then create additional
 
+        if let Some(settings) = config.remembered_peer {
+            let _ = shared.remembered.set(settings);
+        }
         shared.qpack.local(
             config.settings.qpack_max_table_capacity,
             config.settings.qpack_blocked_streams,
@@ -598,6 +601,17 @@ where
 
                     self.got_peer_settings = true;
                     let peer: crate::config::Settings = (&settings).into();
+                    if self.shared.remembered.get().is_some_and(|remembered| {
+                        !crate::PeerSettings(*remembered)
+                            .permits_early_data(&crate::PeerSettings(peer))
+                    }) {
+                        return Poll::Ready(Err(self.handle_connection_error(
+                            InternalConnectionError::new(
+                                Code::H3_SETTINGS_ERROR,
+                                "server reduced SETTINGS after accepting early data".into(),
+                            ),
+                        )));
+                    }
                     self.shared
                         .qpack
                         .peer(peer.qpack_max_table_capacity, peer.qpack_blocked_streams)

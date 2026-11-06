@@ -130,6 +130,13 @@ impl Builder {
         self
     }
 
+    /// Restore peer limits only when QUIC actually attempts 0-RTT.
+    /// Fresh SETTINGS must not reduce these limits after early data is accepted.
+    pub fn remembered_settings(&mut self, settings: crate::PeerSettings) -> &mut Self {
+        self.config.remembered_peer = Some(settings.0);
+        self
+    }
+
     /// Create a new HTTP/3 client from a `quic` connection
     pub async fn build<C, O, B>(
         &mut self,

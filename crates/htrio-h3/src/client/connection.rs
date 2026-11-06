@@ -149,6 +149,50 @@ where
         self.conn_state.qpack.stats()
     }
 
+    /// The peer's received SETTINGS, excluding speculative remembered values.
+    pub fn peer_settings(&self) -> Option<crate::PeerSettings> {
+        self.conn_state
+            .settings
+            .get()
+            .copied()
+            .map(crate::PeerSettings)
+    }
+
+    /// Await fresh peer SETTINGS, including validation of accepted 0-RTT limits.
+    pub async fn wait_peer_settings(&mut self) -> Result<crate::PeerSettings, StreamError> {
+        future::poll_fn(|cx| {
+            if let Some(settings) = self.peer_settings() {
+                return Poll::Ready(Ok(settings));
+            }
+            if self.get_conn_error().is_some() {
+                return Poll::Ready(Err(self.handle_connection_error_on_stream(
+                    InternalConnectionError::new(
+                        Code::H3_SETTINGS_ERROR,
+                        "connection failed before peer SETTINGS".into(),
+                    ),
+                )));
+            }
+            let mut waiters = self.conn_state.settings_waiters.lock().unwrap();
+            if !waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
+                if waiters.len() >= 256 {
+                    drop(waiters);
+                    return Poll::Ready(Err(self.handle_connection_error_on_stream(
+                        InternalConnectionError::new(
+                            Code::H3_EXCESSIVE_LOAD,
+                            "too many SETTINGS waiters".into(),
+                        ),
+                    )));
+                }
+                waiters.push(cx.waker().clone());
+            }
+            if self.conn_state.settings.get().is_some() || self.get_conn_error().is_some() {
+                cx.waker().wake_by_ref();
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
     /// Whether this connection can still accept new requests.
     ///
     /// A received GOAWAY immediately retires the connection, even while existing
@@ -445,6 +489,16 @@ where
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     pub async fn wait_idle(&mut self) -> ConnectionError {
         future::poll_fn(|cx| self.poll_close(cx)).await
+    }
+
+    /// The authenticated peer limits received on this connection.
+    pub fn peer_settings(&self) -> Option<crate::PeerSettings> {
+        self.inner
+            .shared
+            .settings
+            .get()
+            .copied()
+            .map(crate::PeerSettings)
     }
 
     /// Maintain the connection state until it is closed

@@ -9,6 +9,9 @@
 pub mod client;
 
 mod config;
+
+/// Remembered peer limits for accepted HTTP/3 early data.
+pub use config::PeerSettings;
 //pub mod error;
 pub mod ext;
 pub mod priority;

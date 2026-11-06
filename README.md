@@ -148,6 +148,14 @@ SNI. Preconfigured rustls backends use `http3_certificate_verifier()` to supply 
 matching verification policy for ECH rebuilding; normal TLS configurations
 retain it automatically.
 
+`tls_early_data(true)` explicitly enables 0-RTT for empty GET/HEAD requests
+without authentication, cookies, API keys, or sensitive fields. The client
+remembers authenticated SETTINGS, uses the known route, waits for acceptance
+before exposing a response, and retries rejection/425 once with a confirmed
+handshake. Uploads and credentialed requests wait for confirmation. Default TLS
+resumption caches are route/proxy scoped; preconfigured rustls session stores
+retain the application's policy. Session counters contain no ticket contents.
+
 `http3_coalescing(true)` permits cross-origin reuse only within the same client,
 proxy credentials, network generation, and alternative endpoint. The certificate
 is verified again for the new origin. Client-certificate and ECH routes remain

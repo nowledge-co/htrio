@@ -16,7 +16,9 @@ pub struct SharedState {
     pub(crate) priorities:
         std::sync::Mutex<std::collections::BTreeMap<u64, crate::priority::Priority>>,
     /// The settings, sent by the peer
-    settings: OnceLock<Settings>,
+    pub(crate) settings: OnceLock<Settings>,
+    pub(crate) remembered: OnceLock<Settings>,
+    pub(crate) settings_waiters: std::sync::Mutex<Vec<std::task::Waker>>,
     /// The connection error
     connection_error: OnceLock<ErrorOrigin>,
     /// The connection is closing
@@ -31,6 +33,8 @@ impl Default for SharedState {
             qpack: Default::default(),
             priorities: Default::default(),
             settings: OnceLock::new(),
+            remembered: OnceLock::new(),
+            settings_waiters: Default::default(),
             connection_error: OnceLock::new(),
             closing: AtomicBool::new(false),
             waker: AtomicWaker::new(),
@@ -61,7 +65,17 @@ pub trait ConnectionState {
             .shared_state()
             .connection_error
             .get_or_init(move || error);
-        err.clone()
+        let error = err.clone();
+        for waker in self
+            .shared_state()
+            .settings_waiters
+            .lock()
+            .unwrap()
+            .drain(..)
+        {
+            waker.wake();
+        }
+        error
     }
 
     /// set the connection error and wake the connection
@@ -81,6 +95,7 @@ pub trait ConnectionState {
         self.shared_state()
             .settings
             .get()
+            .or_else(|| self.shared_state().remembered.get())
             .map(|s| Cow::Borrowed(s))
             .unwrap_or_default()
     }
@@ -99,6 +114,15 @@ pub trait ConnectionState {
     /// Set the settings
     fn set_settings(&self, settings: Settings) {
         let _ = self.shared_state().settings.set(settings);
+        for waker in self
+            .shared_state()
+            .settings_waiters
+            .lock()
+            .unwrap()
+            .drain(..)
+        {
+            waker.wake();
+        }
     }
 
     /// Returns the waker for the connection

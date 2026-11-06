@@ -20,6 +20,7 @@ pub struct Config {
 
     /// HTTP/3 Settings
     pub settings: Settings,
+    pub(crate) remembered_peer: Option<Settings>,
 }
 
 /// HTTP/3 Settings
@@ -86,6 +87,7 @@ impl TryFrom<Config> for frame::Settings {
         let Config {
             send_grease,
             max_frame_size: _,
+            remembered_peer: _,
             #[cfg(test)]
                 send_settings: _,
             settings:
@@ -168,6 +170,27 @@ impl Default for Settings {
     }
 }
 
+/// Opaque peer SETTINGS snapshot for a resumed HTTP/3 connection.
+///
+/// QPACK tables and stream state are never restored with this snapshot.
+#[derive(Clone, Copy, Debug)]
+pub struct PeerSettings(pub(crate) Settings);
+
+impl PeerSettings {
+    /// Whether fresh settings retain every limit used by accepted early data.
+    pub fn permits_early_data(&self, fresh: &Self) -> bool {
+        let old = self.0;
+        let new = fresh.0;
+        new.max_field_section_size >= old.max_field_section_size
+            && new.qpack_max_table_capacity >= old.qpack_max_table_capacity
+            && new.qpack_blocked_streams >= old.qpack_blocked_streams
+            && (!old.enable_extended_connect || new.enable_extended_connect)
+            && (!old.enable_datagram || new.enable_datagram)
+            && (!old.enable_webtransport || new.enable_webtransport)
+            && new.max_webtransport_sessions >= old.max_webtransport_sessions
+    }
+}
+
 impl Settings {
     /// https://datatracker.ietf.org/doc/html/draft-ietf-webtrans-http3/#section-3.1
     /// Sets `SETTINGS_ENABLE_WEBTRANSPORT` if enabled
@@ -196,6 +219,7 @@ impl Default for Config {
             #[cfg(test)]
             send_settings: true,
             max_frame_size: 1024 * 1024,
+            remembered_peer: None,
             settings: Settings {
                 max_field_section_size: 64 * 1024,
                 ..Default::default()

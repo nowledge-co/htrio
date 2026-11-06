@@ -539,6 +539,7 @@ impl ClientBuilder {
                  quic_transport_config: Option<TransportConfig>,
                  tls_info,
                  verifier,
+                 partition_sessions,
                  quic_stream_receive_window,
                  quic_receive_window,
                  quic_send_window,
@@ -578,6 +579,7 @@ impl ClientBuilder {
                     let mut h3_client_config = H3ClientConfig::default();
                     h3_client_config.tls_info = tls_info;
                     h3_client_config.verifier = verifier;
+                    h3_client_config.partition_sessions = partition_sessions;
                     h3_client_config.qpack = h3_qpack;
                     h3_client_config.coalescing = coalescing;
 
@@ -742,6 +744,7 @@ impl ClientBuilder {
                     #[cfg(feature = "http3")]
                     {
                         let mut h3_tls = conn.clone();
+                        h3_tls.enable_early_data |= config.tls_enable_early_data;
                         h3_tls.alpn_protocols = vec!["h3".into()];
 
                         h3_connector = build_h3_connector(
@@ -751,6 +754,7 @@ impl ClientBuilder {
                             config.quic_transport_config,
                             config.tls_info,
                             config.h3_preconfigured_verifier,
+                            false,
                             config.quic_stream_receive_window,
                             config.quic_receive_window,
                             config.quic_send_window,
@@ -949,6 +953,7 @@ impl ClientBuilder {
                             config.quic_transport_config,
                             config.tls_info,
                             Some(verifier),
+                            true,
                             config.quic_stream_receive_window,
                             config.quic_receive_window,
                             config.quic_send_window,
@@ -2481,9 +2486,11 @@ impl ClientBuilder {
 
     /// Allow TLS 1.3 early data in the HTTP/3 TLS configuration.
     ///
-    /// Defaults to false. The current connector waits for QUIC handshake
-    /// completion before sending HTTP requests; enabling this option alone
-    /// does not send requests as 0-RTT data.
+    /// Disabled by default because early data can be replayed by the network.
+    /// When enabled, only empty GET/HEAD requests without authentication,
+    /// cookies, API keys, or sensitive headers can dispatch before confirmation.
+    /// Resumption requires remembered peer SETTINGS and the same route context.
+    /// Rejection and 425 permit one confirmed retry of an eligible request.
     #[cfg(feature = "http3")]
     #[cfg_attr(docsrs, doc(cfg(feature = "http3")))]
     pub fn tls_early_data(mut self, enabled: bool) -> ClientBuilder {
