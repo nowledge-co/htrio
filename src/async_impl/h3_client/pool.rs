@@ -175,6 +175,24 @@ impl Pool {
             .and_then(|conn| Some(conn.pool()))
     }
 
+    pub fn stats(&self) -> crate::http3::PoolStats {
+        let inner = self.inner.lock().unwrap();
+        let available = inner
+            .idle_conns
+            .values()
+            .filter(|connection| !connection.is_invalid())
+            .count();
+        crate::http3::PoolStats {
+            connecting: inner.connecting.len(),
+            available,
+            retiring: inner.idle_conns.len() - available,
+        }
+    }
+
+    pub fn clear(&self) {
+        self.inner.lock().unwrap().idle_conns.clear();
+    }
+
     pub fn remove(&self, key: &Key) {
         self.inner.lock().unwrap().idle_conns.remove(key);
     }
@@ -185,6 +203,10 @@ impl Pool {
         mut driver: h3::client::Connection<Connection, Bytes>,
         tx: SendRequest<OpenStreams, Bytes>,
         endpoint: quinn::Endpoint,
+        connection: quinn::Connection,
+        direct: bool,
+        connect_time: Duration,
+        tls_info: bool,
     ) -> PoolClient {
         let (close_tx, close_rx) = std::sync::mpsc::channel();
         tokio::spawn(async move {
@@ -201,7 +223,7 @@ impl Pool {
         let Some(notifier) = inner.connecting.remove(&key) else {
             unreachable!("there should be one connecting lock at a time");
         };
-        let client = PoolClient::new(tx);
+        let client = PoolClient::new(tx, connection, direct, connect_time, tls_info);
 
         // Send the client to all our awaiters
         let pool_client = if let Err(watch::error::SendError(Some(unsent_client))) =
@@ -260,11 +282,25 @@ impl PoolInner {
 #[derive(Clone)]
 pub struct PoolClient {
     inner: SendRequest<OpenStreams, Bytes>,
+    info: crate::http3::ConnectionInfo,
 }
 
 impl PoolClient {
-    pub fn new(tx: SendRequest<OpenStreams, Bytes>) -> Self {
-        Self { inner: tx }
+    pub fn new(
+        tx: SendRequest<OpenStreams, Bytes>,
+        connection: quinn::Connection,
+        direct: bool,
+        connect_time: Duration,
+        tls_info: bool,
+    ) -> Self {
+        let info = crate::http3::ConnectionInfo {
+            connection,
+            sender: tx.clone(),
+            direct,
+            connect_time,
+            tls_info,
+        };
+        Self { inner: tx, info }
     }
 
     pub async fn send_request(
@@ -297,7 +333,7 @@ impl PoolClient {
         *wire.extensions_mut() = head.extensions.clone();
         let stream = match self.inner.send_request(wire).await {
             Ok(stream) => stream,
-            Err(error) if error.is_remote_closing() => {
+            Err(error) if error.is_request_not_sent() => {
                 // This error is raised before opening a stream or consuming the
                 // source body. Return ownership for a bounded reconnect attempt.
                 *request = Some(Request::from_parts(head, req_body));
@@ -318,7 +354,7 @@ impl PoolClient {
         let upload = UploadTask(task.abort_handle());
         let mut upload_done = false;
         let mut informational = 0;
-        let response = loop {
+        let mut response = loop {
             tokio::select! {
                 result = &mut rx, if !upload_done => {
                     upload_done = true;
@@ -346,6 +382,18 @@ impl PoolClient {
                 }
             }
         };
+        response.extensions_mut().insert(self.info.clone());
+        if self.info.tls_info {
+            if let Some(identity) = self.info.connection.peer_identity() {
+                if let Ok(chain) =
+                    identity.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+                {
+                    response.extensions_mut().insert(crate::tls::TlsInfo {
+                        peer_certificate: chain.first().map(|certificate| certificate.to_vec()),
+                    });
+                }
+            }
+        }
         let no_body = head_request || matches!(response.status().as_u16(), 204 | 205 | 304);
         let declared = content_length(response.headers())?;
         let remaining = if no_body { Some(0) } else { declared };
@@ -357,6 +405,7 @@ impl PoolClient {
             reading_trailers: false,
             done: false,
             _upload: upload,
+            _connection: self.inner.clone(),
         };
         Ok(response.map(|_| crate::async_impl::body::boxed(body)))
     }
@@ -517,6 +566,7 @@ struct Incoming<S: h3::quic::RecvStream, B: Buf> {
     reading_trailers: bool,
     done: bool,
     _upload: UploadTask,
+    _connection: SendRequest<OpenStreams, Bytes>,
 }
 
 impl<S: h3::quic::RecvStream, B: Buf> Drop for Incoming<S, B> {

@@ -516,6 +516,10 @@ where
     B: Buf,
     S: SendStream<B>,
 {
+    fn poll_stopped(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
+        self.stream.poll_stopped(cx)
+    }
+
     fn poll_finish(
         &mut self,
         cx: &mut std::task::Context<'_>,

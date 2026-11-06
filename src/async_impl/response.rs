@@ -117,6 +117,11 @@ impl Response {
     /// Available for TCP responses. HTTP/3 returns `None`; synthetic addresses
     /// used internally by UDP proxy transports are never reported as real peers.
     pub fn remote_addr(&self) -> Option<SocketAddr> {
+        #[cfg(feature = "http3")]
+        if let Some(info) = self.res.extensions().get::<crate::http3::ConnectionInfo>() {
+            return info.remote_addr();
+        }
+
         self.res
             .extensions()
             .get::<HttpInfo>()

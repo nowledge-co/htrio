@@ -160,7 +160,7 @@ where
         req: http::Request<()>,
     ) -> Result<RequestStream<T::BidiStream, B>, StreamError> {
         if let Some(error) = self.check_peer_connection_closing() {
-            return Err(error);
+            return Err(error.request_not_sent());
         };
 
         let (parts, _) = req.into_parts();
@@ -184,14 +184,14 @@ where
         //# client MUST send only a single request on a given stream.
         let mut stream = future::poll_fn(|cx| self.open.poll_open_bidi(cx))
             .await
-            .map_err(|e| self.handle_quic_stream_error(e))?;
+            .map_err(|e| self.handle_quic_stream_error(e).request_not_sent())?;
 
         // Opening may wait for the peer's stream limit while the driver receives
         // GOAWAY. No request bytes have been written, so reconnect remains safe.
         if let Some(error) = self.check_peer_connection_closing() {
             stream.stop_sending(Code::H3_REQUEST_CANCELLED.value());
             stream.reset(Code::H3_REQUEST_CANCELLED.value());
-            return Err(error);
+            return Err(error.request_not_sent());
         }
 
         //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2

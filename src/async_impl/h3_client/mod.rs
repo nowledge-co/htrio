@@ -26,6 +26,13 @@ pub(crate) use pool::PoolClient;
 pub(crate) struct H3Client {
     pool: Pool,
     connector: H3Connector,
+    health: std::sync::Arc<std::sync::Mutex<RouteHealth>>,
+}
+
+#[derive(Default)]
+struct RouteHealth {
+    generation: u64,
+    failed: std::collections::HashMap<pool::Key, (u32, std::time::Instant)>,
 }
 
 impl H3Client {
@@ -33,6 +40,7 @@ impl H3Client {
         Self {
             pool: Pool::new(pool_timeout),
             connector,
+            health: Default::default(),
         }
     }
 
@@ -62,9 +70,92 @@ impl H3Client {
             }
             pool::Connecting::Acquired(lock) => lock,
         };
+        let started = std::time::Instant::now();
+        let direct = proxy.is_none();
         let destination = pool::domain_as_uri(key.clone());
-        let (driver, tx, endpoint) = self.connector.connect(destination, key.2, proxy).await?;
-        Ok(self.pool.new_connection(lock, driver, tx, endpoint))
+        let (driver, tx, endpoint, connection) =
+            self.connector.connect(destination, key.2, proxy).await?;
+        Ok(self.pool.new_connection(
+            lock,
+            driver,
+            tx,
+            endpoint,
+            connection,
+            direct,
+            started.elapsed(),
+            self.connector.tls_info(),
+        ))
+    }
+
+    pub(crate) fn network_generation(&mut self, generation: u64) -> bool {
+        let mut health = self.health.lock().unwrap();
+        if health.generation != generation {
+            health.generation = generation;
+            health.failed.clear();
+            self.pool.clear();
+            self.connector.network_changed();
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn is_broken(
+        &self,
+        origin: &Uri,
+        alternative: &Authority,
+        proxy: Option<&crate::proxy::Intercepted>,
+    ) -> bool {
+        let Ok(mut key) = pool::extract_domain(origin) else {
+            return false;
+        };
+        key.2 = alternative.clone();
+        key.3 = proxy.map(pool::ProxyKey::new);
+        self.health
+            .lock()
+            .unwrap()
+            .failed
+            .get(&key)
+            .is_some_and(|(_, until)| *until > std::time::Instant::now())
+    }
+
+    // Call only after the same origin is reachable through the selected TCP
+    // route. An offline network must not poison otherwise healthy QUIC routes.
+    pub(crate) fn confirm_broken(
+        &self,
+        origin: &Uri,
+        alternative: Authority,
+        proxy: Option<&crate::proxy::Intercepted>,
+    ) {
+        let Ok(mut key) = pool::extract_domain(origin) else {
+            return;
+        };
+        key.2 = alternative;
+        key.3 = proxy.map(pool::ProxyKey::new);
+        let mut health = self.health.lock().unwrap();
+        if health.failed.len() >= 256 {
+            health
+                .failed
+                .retain(|_, (_, until)| *until > std::time::Instant::now());
+        }
+        if health.failed.len() >= 256 {
+            return;
+        }
+        let failures = health
+            .failed
+            .get(&key)
+            .map_or(1, |(count, _)| count.saturating_add(1));
+        let delay = Duration::from_secs((30_u64 << failures.min(7)).min(3600));
+        health
+            .failed
+            .insert(key, (failures, std::time::Instant::now() + delay));
+    }
+
+    pub(crate) fn pool_stats(&self) -> crate::http3::PoolStats {
+        self.pool.stats()
+    }
+
+    pub(crate) fn rebind(&self, socket: std::net::UdpSocket) -> Result<(), BoxError> {
+        self.connector.rebind(socket)
     }
 
     pub(crate) fn remove(

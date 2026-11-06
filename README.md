@@ -81,9 +81,13 @@ origin. Each redirect hop makes its own transport decision.
 
 - Routing can use an alternative host, but TLS authentication, the URL, and
   HTTP authority retain the original origin. Alternative requests send `Alt-Used`.
-- Connection preparation has a one-second budget, capped by `connect_timeout`.
-  Change it with `http3_connect_timeout`. Failure before dispatch falls back to
-  TCP through the selected route, preserving a configured proxy.
+- Connection preparation has a one-second per-alternative budget, capped by
+  `connect_timeout`. Change it with `http3_connect_timeout`. After 250 ms, TCP
+  connection establishment races QUIC. Only the winning transport receives the
+  request. Available alternatives and resolved addresses are rotated/raced.
+- Route backoff is scoped to the client and proxy credentials and confirmed
+  after the same TCP route succeeds. `Client::network_changed()` resets network
+  state and future endpoints while active streams retain their transport.
 - After dispatch, ambiguous transport failures do not trigger TCP replay.
   Safe protocol NACKs follow the retry policy. A 421 invalidates the alternative;
   the origin is retried only when the body can be cloned.
@@ -111,9 +115,21 @@ HTTP/3 requires rustls with TLS 1.3 and never falls back to TCP. No custom
 `RUSTFLAGS` are needed. `.alt_svc(false)` disables discovery while retaining
 explicit HTTP/3 support.
 
-Discovery uses response headers. HTTP/2 ALTSVC frames, HTTPS DNS records, and
-disk persistence are not implemented. HTTP/3 currently does not expose a remote
-socket address or `TlsInfo`; TCP responses support those APIs.
+Discovery uses response headers. HTTP/2 ALTSVC frames and HTTPS DNS records are
+not yet implemented. `AltSvcCache::snapshot()` and `restore()` allow trusted,
+application-controlled persistence; htrio never writes cache files itself.
+
+HTTP/3 preserves informational responses and trailers, checks message lengths,
+and bounds encoded/control frames and decoded header sections. Dropping a
+request or response cancels pending upload source reads. `preconnect()` opens
+connections without an HTTP request; `http3_keep_alive_interval()` controls
+keepalive. `http3_rebind()` migrates direct QUIC endpoints only.
+
+Response extensions expose `http3::ConnectionInfo` with setup time, current RTT,
+loss/congestion/MTU statistics, and pool availability. `remote_addr()` reports
+direct peers; SOCKS virtual addresses stay private. `tls_info(true)` includes the
+peer certificate. `http3_transport_config()` accepts native QUIC settings,
+including application-owned qlog streams with the `http3-qlog` feature.
 
 ## SOCKS5 UDP and DNS
 

@@ -60,6 +60,7 @@ pub(super) async fn resolve_host(
     }
     let addresses = resolve(resolver, host.parse()?).await?;
     Ok(addresses
+        .take(16)
         .map(|mut address| {
             if let Some(port) = port {
                 address.set_port(port);

@@ -40,6 +40,11 @@ pub(crate) enum Connector {
     // at least one custom layer along with maybe an outer timeout layer
     // from `builder.connect_timeout()`
     WithLayers(BoxCloneSyncService<Unnameable, Conn, BoxError>),
+    #[cfg(feature = "http3")]
+    Prepared {
+        inner: Box<Connector>,
+        ready: PreparedConnections,
+    },
 }
 
 impl Service<Uri> for Connector {
@@ -51,6 +56,8 @@ impl Service<Uri> for Connector {
         match self {
             Connector::Simple(service) => service.poll_ready(cx),
             Connector::WithLayers(service) => service.poll_ready(cx),
+            #[cfg(feature = "http3")]
+            Connector::Prepared { inner, .. } => inner.poll_ready(cx),
         }
     }
 
@@ -58,7 +65,93 @@ impl Service<Uri> for Connector {
         match self {
             Connector::Simple(service) => service.call(dst),
             Connector::WithLayers(service) => service.call(Unnameable(dst)),
+            #[cfg(feature = "http3")]
+            Connector::Prepared { inner, ready } => {
+                if let Some(connection) = ready.take(&dst) {
+                    return Box::pin(std::future::ready(Ok(connection)));
+                }
+                inner.call(dst)
+            }
         }
+    }
+}
+
+// A prepared socket has completed the same proxy/TLS connector used by Hyper.
+// It never contains request bytes and expires quickly if no request claims it.
+#[cfg(feature = "http3")]
+#[derive(Clone, Default)]
+pub(crate) struct PreparedConnections(
+    Arc<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Conn)>>>,
+);
+
+#[cfg(feature = "http3")]
+impl PreparedConnections {
+    fn key(uri: &Uri) -> String {
+        format!(
+            "{}://{}",
+            uri.scheme_str().unwrap_or("http"),
+            uri.authority().map_or("", |a| a.as_str())
+        )
+    }
+
+    fn take(&self, uri: &Uri) -> Option<Conn> {
+        let mut ready = self.0.lock().unwrap();
+        ready.retain(|_, (when, _)| when.elapsed() < Duration::from_secs(30));
+        ready
+            .remove(&Self::key(uri))
+            .map(|(_, connection)| connection)
+    }
+
+    pub(crate) fn insert(&self, uri: &Uri, connection: Conn) {
+        let mut ready = self.0.lock().unwrap();
+        ready.retain(|_, (when, _)| when.elapsed() < Duration::from_secs(30));
+        if ready.len() >= 64 {
+            if let Some(oldest) = ready
+                .iter()
+                .min_by_key(|(_, (when, _))| *when)
+                .map(|(key, _)| key.clone())
+            {
+                ready.remove(&oldest);
+            }
+        }
+        ready.insert(Self::key(uri), (std::time::Instant::now(), connection));
+    }
+
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+}
+
+#[cfg(feature = "http3")]
+#[derive(Clone)]
+pub(crate) struct TcpPreconnect {
+    connector: Connector,
+    pub(crate) ready: PreparedConnections,
+}
+
+#[cfg(feature = "http3")]
+impl TcpPreconnect {
+    pub(crate) async fn connect(&self, uri: Uri) -> Result<Conn, BoxError> {
+        use tower::ServiceExt;
+        self.connector.clone().oneshot(uri).await
+    }
+}
+
+#[cfg(feature = "http3")]
+impl Connector {
+    pub(crate) fn with_preconnect(self) -> (Self, TcpPreconnect) {
+        let ready = PreparedConnections::default();
+        let prepare = TcpPreconnect {
+            connector: self.clone(),
+            ready: ready.clone(),
+        };
+        (
+            Self::Prepared {
+                inner: Box::new(self),
+                ready,
+            },
+            prepare,
+        )
     }
 }
 

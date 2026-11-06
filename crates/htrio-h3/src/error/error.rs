@@ -77,6 +77,11 @@ pub enum LocalError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum StreamError {
+    /// Connection setup failed before any request bytes were dispatched.
+    RequestNotSent {
+        /// The underlying connection or stream-opening error.
+        source: Box<StreamError>,
+    },
     /// The error occurred on the stream
     #[cfg_attr(
         not(feature = "i-implement-a-third-party-backend-and-opt-into-breaking-changes"),
@@ -137,6 +142,17 @@ pub enum StreamError {
 }
 
 impl StreamError {
+    /// Whether the complete request can be moved to a fresh connection safely.
+    pub fn is_request_not_sent(&self) -> bool {
+        matches!(self, Self::RequestNotSent { .. } | Self::RemoteClosing)
+    }
+
+    pub(crate) fn request_not_sent(self) -> Self {
+        Self::RequestNotSent {
+            source: Box::new(self),
+        }
+    }
+
     /// Whether GOAWAY prevented opening a request stream before dispatch.
     pub fn is_remote_closing(&self) -> bool {
         matches!(self, Self::RemoteClosing)
@@ -145,6 +161,7 @@ impl StreamError {
     /// Returns if the error is H3_NO_ERROR
     pub fn is_h3_no_error(&self) -> bool {
         match self {
+            StreamError::RequestNotSent { source } => source.is_h3_no_error(),
             StreamError::StreamError {
                 code: Code::H3_NO_ERROR,
                 ..
@@ -179,6 +196,7 @@ impl std::error::Error for ConnectionError {}
 impl std::fmt::Display for StreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            StreamError::RequestNotSent { source } => write!(f, "request not dispatched: {source}"),
             StreamError::StreamError { code, reason } => {
                 write!(f, "Stream error: {:?} - {}", code, reason)
             }
@@ -198,4 +216,11 @@ impl std::fmt::Display for StreamError {
     }
 }
 
-impl std::error::Error for StreamError {}
+impl std::error::Error for StreamError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::RequestNotSent { source } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
+}

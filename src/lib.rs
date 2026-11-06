@@ -274,6 +274,9 @@ pub use url::Url;
 #[cfg(feature = "http3")]
 pub mod alt_svc;
 
+#[cfg(feature = "http3")]
+pub mod http3;
+
 #[macro_use]
 mod error;
 if_hyper! {

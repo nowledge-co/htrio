@@ -4,7 +4,7 @@
 //! TLS verifier must enforce origin authentication. Share a cache with
 //! [`crate::ClientBuilder::alt_svc_cache`]. Call
 //! [`AltSvcCache::network_changed`] when the application detects a network change.
-//! Cache contents are process-local and are never written to disk.
+//! Persistence is application-controlled through snapshots; the client never writes to disk.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -16,13 +16,14 @@ use http::{HeaderMap, StatusCode, Uri};
 const DEFAULT_MAX_AGE: u64 = 86_400;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_ALTERNATIVES: usize = 8;
+#[cfg(test)]
 const BROKEN_BACKOFF: Duration = Duration::from_secs(300);
 
 /// A bounded HTTP/3 alternative service cache shared by cloned clients.
 ///
 /// Entries are scoped to the HTTPS origin's host and effective port. Cache
 /// controls affect future route selection; they do not close active connections.
-/// HTTP/2 ALTSVC frames and disk persistence are not implemented.
+/// HTTP/2 ALTSVC frames are not implemented; persistence uses explicit snapshots.
 #[derive(Clone, Debug)]
 pub struct AltSvcCache {
     inner: Arc<Mutex<State>>,
@@ -33,6 +34,7 @@ pub struct AltSvcCache {
 struct State {
     origins: HashMap<String, Entry>,
     sequence: u64,
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -47,6 +49,23 @@ pub(crate) struct Alternative {
     expires: Instant,
     persist: bool,
     broken_until: Option<Instant>,
+}
+
+/// A single alternative suitable for application-controlled persistence.
+///
+/// Store records in trusted, origin-scoped application storage. Importing a
+/// record never bypasses origin certificate verification. Failure backoff and
+/// network state are deliberately not persisted.
+#[derive(Clone, Debug)]
+pub struct Record {
+    /// HTTPS origin, including its effective port.
+    pub origin: String,
+    /// Alternative host and port.
+    pub authority: String,
+    /// Absolute expiration; import caps freshness at one year.
+    pub expires_at: SystemTime,
+    /// Whether the alternative survives network changes.
+    pub persist: bool,
 }
 
 impl Default for AltSvcCache {
@@ -77,10 +96,12 @@ impl AltSvcCache {
     /// Discard expired alternatives and those without `persist=1`.
     ///
     /// Network change detection is left to the embedding application.
-    /// Persistent alternatives keep their existing expiry and failure backoff.
+    /// Persistent alternatives keep their existing expiry. Client route failure state resets.
     pub fn network_changed(&self) {
         let now = Instant::now();
-        self.inner.lock().unwrap().origins.retain(|_, entry| {
+        let mut state = self.inner.lock().unwrap();
+        state.generation = state.generation.wrapping_add(1);
+        state.origins.retain(|_, entry| {
             entry
                 .alternatives
                 .retain(|alt| alt.persist && alt.expires > now);
@@ -100,6 +121,110 @@ impl AltSvcCache {
         self.len() == 0
     }
 
+    /// Export unexpired alternatives without writing to disk.
+    pub fn snapshot(&self) -> Vec<Record> {
+        let now = Instant::now();
+        let wall = SystemTime::now();
+        let mut state = self.inner.lock().unwrap();
+        prune(&mut state, now);
+        state
+            .origins
+            .iter()
+            .flat_map(|(origin, entry)| {
+                entry.alternatives.iter().map(|alt| Record {
+                    origin: origin.clone(),
+                    authority: alt.authority.to_string(),
+                    expires_at: wall + alt.expires.saturating_duration_since(now),
+                    persist: alt.persist,
+                })
+            })
+            .collect()
+    }
+
+    /// Restore trusted records, validating syntax, freshness, and cache bounds.
+    ///
+    /// Existing records for an imported origin are replaced as a complete set.
+    pub fn restore(&self, records: impl IntoIterator<Item = Record>) {
+        let mut grouped: HashMap<String, Vec<Alternative>> = HashMap::new();
+        let now = Instant::now();
+        for record in records
+            .into_iter()
+            .take(self.capacity.saturating_mul(MAX_ALTERNATIVES))
+        {
+            let Ok(origin) = record.origin.parse::<Uri>() else {
+                continue;
+            };
+            let Some(key) = origin_key(&origin) else {
+                continue;
+            };
+            let Ok(age) = record.expires_at.duration_since(SystemTime::now()) else {
+                continue;
+            };
+            let age = age.min(Duration::from_secs(31_536_000));
+            let item = format!(
+                "h3=\"{}\";ma={};persist={}",
+                record.authority,
+                age.as_secs(),
+                u8::from(record.persist)
+            );
+            let Some(alt) = parse_alternative(&origin, &item, Duration::ZERO, now) else {
+                continue;
+            };
+            if !grouped.contains_key(&key) && grouped.len() >= self.capacity {
+                continue;
+            }
+            let alternatives = grouped.entry(key).or_default();
+            if alternatives.len() < MAX_ALTERNATIVES
+                && !alternatives
+                    .iter()
+                    .any(|existing| existing.authority == alt.authority)
+            {
+                alternatives.push(alt);
+            }
+        }
+        let mut state = self.inner.lock().unwrap();
+        prune(&mut state, now);
+        for (origin, alternatives) in grouped {
+            if state.origins.len() >= self.capacity && !state.origins.contains_key(&origin) {
+                if let Some(oldest) = state
+                    .origins
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.sequence)
+                    .map(|(key, _)| key.clone())
+                {
+                    state.origins.remove(&oldest);
+                }
+            }
+            state.sequence = state.sequence.wrapping_add(1);
+            let sequence = state.sequence;
+            state.origins.insert(
+                origin,
+                Entry {
+                    alternatives,
+                    sequence,
+                },
+            );
+        }
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.inner.lock().unwrap().generation
+    }
+
+    pub(crate) fn candidates(&self, origin: &Uri) -> Vec<Alternative> {
+        let Some(key) = origin_key(origin) else {
+            return Vec::new();
+        };
+        let mut state = self.inner.lock().unwrap();
+        prune(&mut state, Instant::now());
+        state
+            .origins
+            .get(&key)
+            .map(|entry| entry.alternatives.clone())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
     pub(crate) fn get(&self, origin: &Uri) -> Option<Alternative> {
         let key = origin_key(origin)?;
         let now = Instant::now();
@@ -119,6 +244,7 @@ impl AltSvcCache {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_broken(&self, origin: &Uri, alternative: &Alternative) {
         let Some(key) = origin_key(origin) else {
             return;

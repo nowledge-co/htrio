@@ -84,6 +84,7 @@ socks = []
 system-proxy = ["hyper-util/client-proxy-system"]
 
 # HTTP/3 transport and RFC 7838 discovery.
+http3-qlog = ["http3", "quinn/qlog"]
 http3 = ["rustls", "dep:httpdate", "dep:h3", "dep:h3-quinn", "dep:quinn", "tokio/macros"]
 
 

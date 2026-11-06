@@ -62,3 +62,16 @@ failure/cancellation boundary. New commits must qualify independently; previous
 CI results do not qualify changed code. Chromium parity claims are limited to
 implemented, tested contracts rather than browser-only features or field-trial
 defaults. Full Mem application integration is a separate qualification.
+
+## Qualification log
+
+- `9e1ad31`: local Quinn dependency graph and compile checks qualified. The
+  inherited h3 and Quinn CI jobs passed. Native semantic regressions identified
+  response/Client lifetime ownership, a missing STOP_SENDING forwarding layer,
+  and a GOAWAY test synchronization gap. Follow-up fixes retain the sender in
+  response metadata, forward cancellation through buffered streams, expose a
+  typed pre-dispatch error, and synchronize the GOAWAY regression on pool state.
+- Connection/recovery batch: add TCP/QUIC preparation racing, alternative
+  rotation, bounded address racing, proxy-scoped route health, network generation
+  invalidation, direct endpoint rebinding, preconnect/keepalive, cache snapshots,
+  and connection statistics. Qualification remains pending until its exact CI.

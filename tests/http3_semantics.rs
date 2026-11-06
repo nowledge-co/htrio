@@ -227,10 +227,8 @@ async fn dropping_a_response_cancels_pending_upload_and_receive_halves() {
     })
     .await;
     let (tx, body_dropped) = oneshot::channel();
-    let response = server
-        .client_builder()
-        .build()
-        .unwrap()
+    let client = server.client_builder().build().unwrap();
+    let response = client
         .post(server.url("/"))
         .body(htrio::Body::wrap(PendingBody(Some(tx))))
         .send()
@@ -298,6 +296,13 @@ async fn goaway_retires_the_connection_before_reusing_it() {
         .await
         .unwrap();
     server.goaway().await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while client.http3_pool_stats().available != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     let body = futures_util::stream::once(async {
         Ok::<_, std::io::Error>(Bytes::from_static(b"single dispatch"))
     });
@@ -337,4 +342,92 @@ async fn informational_response_count_is_bounded() {
         .await
         .unwrap_err();
     assert!(format!("{error:?}").contains("too many HTTP/3 informational"));
+}
+
+#[tokio::test]
+async fn preconnect_rebind_and_network_change_preserve_protocol_boundaries() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let server = Server::new(move |_, mut stream| {
+        let calls = observed.clone();
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            stream.send_response(Response::new(())).await.unwrap();
+            stream.finish().await.unwrap();
+        }
+    })
+    .await;
+    let client = server.client_builder().tls_info(true).build().unwrap();
+    client.preconnect(server.url("/")).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(client.http3_pool_stats().available, 1);
+    let response = client.get(server.url("/first")).send().await.unwrap();
+    assert_eq!(response.remote_addr(), Some(server.address));
+    assert!(response
+        .extensions()
+        .get::<htrio::tls::TlsInfo>()
+        .unwrap()
+        .peer_certificate()
+        .is_some());
+    let info = response
+        .extensions()
+        .get::<htrio::http3::ConnectionInfo>()
+        .unwrap()
+        .clone();
+    assert!(info.stats().udp_rx.datagrams > 0);
+    response.bytes().await.unwrap();
+    client
+        .http3_rebind(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+        .unwrap();
+    let response = client.get(server.url("/migrated")).send().await.unwrap();
+    assert_eq!(
+        response
+            .extensions()
+            .get::<htrio::http3::ConnectionInfo>()
+            .unwrap()
+            .id(),
+        info.id()
+    );
+    response.bytes().await.unwrap();
+    client.network_changed();
+    assert_eq!(client.http3_pool_stats().available, 0);
+    let response = client.get(server.url("/new-network")).send().await.unwrap();
+    assert_ne!(
+        response
+            .extensions()
+            .get::<htrio::http3::ConnectionInfo>()
+            .unwrap()
+            .id(),
+        info.id()
+    );
+    response.bytes().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn resolved_addresses_race_past_a_silent_first_candidate() {
+    let server = Server::new(|_, mut stream| async move {
+        stream.send_response(Response::new(())).await.unwrap();
+        stream.finish().await.unwrap();
+    })
+    .await;
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let client = server
+        .client_builder()
+        .resolve_to_addrs(
+            "origin.test",
+            &[silent.local_addr().unwrap(), server.address],
+        )
+        .build()
+        .unwrap();
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.get("https://origin.test/").send(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response.remote_addr(), Some(server.address));
+    response.bytes().await.unwrap();
 }

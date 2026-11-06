@@ -627,3 +627,85 @@ async fn native_tls_alpn_still_negotiates_http2_when_http3_is_compiled() {
     assert_eq!(response.version(), Version::HTTP_2);
     response.bytes().await.unwrap();
 }
+
+#[tokio::test]
+async fn rotates_failed_alternatives_without_dispatching_a_second_body() {
+    let closed = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let bad_port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let server = LocalServer::new(move |request, port| {
+        if request.uri().path() == "/seed" {
+            Response::builder()
+                .header(
+                    "alt-svc",
+                    format!("h3=\"alternative.test:{bad_port}\", h3=\"alternative.test:{port}\""),
+                )
+                .body(Bytes::new())
+                .unwrap()
+        } else {
+            Response::new(request.into_body())
+        }
+    })
+    .await;
+    let client = server
+        .client_builder()
+        .http3_connect_timeout(Duration::from_millis(100))
+        .build()
+        .unwrap();
+    client
+        .get(server.url("/seed"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let response = client
+        .post(server.url("/echo"))
+        .body(htrio::Body::wrap_stream(futures_util::stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"once")),
+        ])))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.version(), Version::HTTP_3);
+    assert_eq!(response.text().await.unwrap(), "once");
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.method() == "POST")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn tcp_connection_races_a_blackholed_quic_handshake() {
+    let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = blackhole.local_addr().unwrap().port();
+    let server = LocalServer::new(move |request, _| advertise(request, port)).await;
+    let client = server
+        .client_builder()
+        .http3_connect_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    client
+        .get(server.url("/seed"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.post(server.url("/echo")).body("one dispatch").send(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response.version(), Version::HTTP_2);
+    assert_eq!(response.text().await.unwrap(), "one dispatch");
+    assert_eq!(server.requests().len(), 2);
+}

@@ -87,6 +87,7 @@ enum Matcher_ {
 
 /// Our own type, wrapping an `Intercept`, since we may have a few additional
 /// pieces attached thanks to `htrio`s extra proxy configuration.
+#[derive(Clone)]
 pub(crate) struct Intercepted {
     inner: matcher::Intercept,
     /// This is because of `htrio::Proxy`'s design which allows configuring

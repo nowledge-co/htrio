@@ -268,6 +268,8 @@ struct Config {
     #[cfg(feature = "http3")]
     quic_max_idle_timeout: Option<Duration>,
     #[cfg(feature = "http3")]
+    quic_transport_config: Option<TransportConfig>,
+    #[cfg(feature = "http3")]
     quic_stream_receive_window: Option<VarInt>,
     #[cfg(feature = "http3")]
     quic_receive_window: Option<VarInt>,
@@ -403,6 +405,8 @@ impl ClientBuilder {
                 #[cfg(feature = "http3")]
                 quic_max_idle_timeout: None,
                 #[cfg(feature = "http3")]
+                quic_transport_config: None,
+                #[cfg(feature = "http3")]
                 quic_stream_receive_window: None,
                 #[cfg(feature = "http3")]
                 quic_receive_window: None,
@@ -520,6 +524,8 @@ impl ClientBuilder {
                 |resolver,
                  tls,
                  quic_max_idle_timeout: Option<Duration>,
+                 quic_transport_config: Option<TransportConfig>,
+                 tls_info,
                  quic_stream_receive_window,
                  quic_receive_window,
                  quic_send_window,
@@ -529,7 +535,7 @@ impl ClientBuilder {
                  h3_send_grease,
                  local_address,
                  http_version_pref: &HttpVersionPref| {
-                    let mut transport_config = TransportConfig::default();
+                    let mut transport_config = quic_transport_config.unwrap_or_default();
 
                     if let Some(max_idle_timeout) = quic_max_idle_timeout {
                         transport_config.max_idle_timeout(Some(
@@ -555,6 +561,7 @@ impl ClientBuilder {
                     }
 
                     let mut h3_client_config = H3ClientConfig::default();
+                    h3_client_config.tls_info = tls_info;
 
                     if let Some(max_field_section_size) = h3_max_field_section_size {
                         h3_client_config.max_field_section_size = Some(max_field_section_size);
@@ -723,6 +730,8 @@ impl ClientBuilder {
                             resolver.clone(),
                             h3_tls,
                             config.quic_max_idle_timeout,
+                            config.quic_transport_config,
+                            config.tls_info,
                             config.quic_stream_receive_window,
                             config.quic_receive_window,
                             config.quic_send_window,
@@ -928,6 +937,8 @@ impl ClientBuilder {
                             resolver.clone(),
                             h3_tls,
                             config.quic_max_idle_timeout,
+                            config.quic_transport_config,
+                            config.tls_info,
                             config.quic_stream_receive_window,
                             config.quic_receive_window,
                             config.quic_send_window,
@@ -1099,25 +1110,31 @@ impl ClientBuilder {
             Some(format!("{:?}", &config.redirect_policy))
         };
 
-        let hyper_client = builder.build(connector_builder.build(config.connector_layers));
+        let connector = connector_builder.build(config.connector_layers);
+        #[cfg(feature = "http3")]
+        let (connector, tcp_preconnect) = connector.with_preconnect();
+        let hyper_client = builder.build(connector);
+        #[cfg(feature = "http3")]
+        let http3 = super::transport::Http3Transport {
+            client: h3_connector
+                .map(|connector| H3Client::new(connector, config.pool_idle_timeout)),
+            tcp_preconnect,
+            cache: config.alt_svc_cache.clone(),
+            discover: h3_network_supported
+                && config.alt_svc
+                && config.tls_sni
+                && config.hostname_verification
+                && config.certs_verification
+                && matches!(config.http_version_pref, HttpVersionPref::All),
+            prior_knowledge: matches!(config.http_version_pref, HttpVersionPref::Http3),
+            proxies: proxies.clone(),
+            connect_timeout: config.connect_timeout,
+            alternative_timeout: config.http3_connect_timeout,
+        };
         let hyper_service = HyperService {
             hyper: hyper_client,
             #[cfg(feature = "http3")]
-            http3: super::transport::Http3Transport {
-                client: h3_connector
-                    .map(|connector| H3Client::new(connector, config.pool_idle_timeout)),
-                cache: config.alt_svc_cache.clone(),
-                discover: h3_network_supported
-                    && config.alt_svc
-                    && config.tls_sni
-                    && config.hostname_verification
-                    && config.certs_verification
-                    && matches!(config.http_version_pref, HttpVersionPref::All),
-                prior_knowledge: matches!(config.http_version_pref, HttpVersionPref::Http3),
-                proxies: proxies.clone(),
-                connect_timeout: config.connect_timeout,
-                alternative_timeout: config.http3_connect_timeout,
-            },
+            http3: http3.clone(),
         };
 
         let redirect_policy = {
@@ -1158,6 +1175,8 @@ impl ClientBuilder {
 
         Ok(Client {
             inner: Arc::new(ClientRef {
+                #[cfg(feature = "http3")]
+                http3,
                 accepts: config.accepts,
                 #[cfg(feature = "cookies")]
                 cookie_store: config.cookie_store.clone(),
@@ -2503,6 +2522,30 @@ impl ClientBuilder {
         self
     }
 
+    /// Supply native QUIC settings, including keepalive and optional qlog output.
+    ///
+    /// Dedicated `http3_*` window and timeout setters override this base config.
+    /// Enable `http3-qlog` to configure a `QlogStream`. Capture is application-owned
+    /// and disabled by default.
+    #[cfg(feature = "http3")]
+    pub fn http3_transport_config(
+        mut self,
+        config: crate::http3::TransportConfig,
+    ) -> ClientBuilder {
+        self.config.quic_transport_config = Some(config);
+        self
+    }
+
+    /// Send QUIC keepalive packets at this interval, or disable them with `None`.
+    #[cfg(feature = "http3")]
+    pub fn http3_keep_alive_interval(mut self, interval: Option<Duration>) -> ClientBuilder {
+        self.config
+            .quic_transport_config
+            .get_or_insert_with(Default::default)
+            .keep_alive_interval(interval);
+        self
+    }
+
     /// Maximum number of bytes to transmit to a peer without acknowledgment
     ///
     /// Please see docs in [`TransportConfig`] in [`quinn`].
@@ -2656,6 +2699,52 @@ impl Client {
     /// This is the same as `ClientBuilder::new()`.
     pub fn builder() -> ClientBuilder {
         ClientBuilder::new()
+    }
+
+    /// Notify the client that network reachability or routing has changed.
+    ///
+    /// Future HTTP/3 connections use a fresh endpoint and route-health state.
+    /// Active streams and SOCKS associations retain their existing transport.
+    #[cfg(feature = "http3")]
+    pub fn network_changed(&self) {
+        self.inner.http3.cache.network_changed();
+        let mut transport = self.inner.http3.clone();
+        transport.network_changed();
+    }
+
+    /// Snapshot the HTTP/3 route pool without reading traffic contents.
+    #[cfg(feature = "http3")]
+    pub fn http3_pool_stats(&self) -> crate::http3::PoolStats {
+        self.inner
+            .http3
+            .client
+            .as_ref()
+            .map_or_else(Default::default, H3Client::pool_stats)
+    }
+
+    /// Rebind direct QUIC connections to an application-configured UDP socket.
+    ///
+    /// Quinn validates new paths and retains stream state. SOCKS associations
+    /// remain tied to their relay and are never moved to a direct socket.
+    #[cfg(feature = "http3")]
+    pub fn http3_rebind(&self, socket: std::net::UdpSocket) -> crate::Result<()> {
+        self.inner.http3.rebind(socket)
+    }
+
+    /// Establish a connection without dispatching an HTTP request.
+    ///
+    /// Uses the client's proxy, DNS, TLS, and protocol policy. TCP sockets expire
+    /// after 30 seconds if unused; HTTP/3 uses the regular connection pool.
+    #[cfg(feature = "http3")]
+    pub async fn preconnect<U: IntoUrl>(&self, url: U) -> crate::Result<()> {
+        let url = url.into_url()?;
+        if !matches!(url.scheme(), "http" | "https")
+            || (self.inner.https_only && url.scheme() != "https")
+        {
+            return Err(error::url_bad_scheme(url));
+        }
+        let uri = try_uri(&url).map_err(|_| error::url_invalid_uri(url))?;
+        self.inner.http3.clone().preconnect(uri).await
     }
 
     /// Convenience method to make a `GET` request to a URL.
@@ -3071,6 +3160,8 @@ type LayeredService<T> = MaybeDecompression<
 type LayeredFuture<T> = <LayeredService<T> as Service<http::Request<Body>>>::Future;
 
 struct ClientRef {
+    #[cfg(feature = "http3")]
+    http3: super::transport::Http3Transport,
     accepts: Accepts,
     #[cfg(feature = "cookies")]
     cookie_store: Option<Arc<dyn cookie::CookieStore>>,

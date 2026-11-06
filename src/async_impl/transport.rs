@@ -57,6 +57,7 @@ mod http3 {
     pub(crate) struct Http3Transport {
         pub(crate) client: Option<H3Client>,
         pub(crate) cache: Arc<AltSvcCache>,
+        pub(crate) tcp_preconnect: crate::connect::TcpPreconnect,
         pub(crate) discover: bool,
         pub(crate) prior_knowledge: bool,
         pub(crate) proxies: Arc<Vec<Matcher>>,
@@ -64,7 +65,70 @@ mod http3 {
         pub(crate) alternative_timeout: Duration,
     }
 
+    enum Prepared {
+        Http3(PoolClient, crate::alt_svc::Alternative),
+        Tcp(crate::connect::sealed::Conn),
+    }
+
     impl Http3Transport {
+        pub(crate) fn network_changed(&mut self) {
+            if let Some(client) = self.client.as_mut() {
+                client.network_generation(self.cache.generation());
+            }
+            self.tcp_preconnect.ready.clear();
+        }
+
+        pub(crate) fn rebind(&self, socket: std::net::UdpSocket) -> crate::Result<()> {
+            self.client
+                .as_ref()
+                .ok_or_else(|| error::request("HTTP/3 is not configured"))?
+                .rebind(socket)
+                .map_err(error::request)
+        }
+
+        pub(crate) async fn preconnect(&mut self, origin: Uri) -> crate::Result<()> {
+            let proxy = self
+                .proxies
+                .iter()
+                .find_map(|proxy| proxy.intercept(&origin));
+            if self.prior_knowledge {
+                self.prepare(&origin, None, proxy.as_ref(), false).await?;
+            } else if self.discover && origin.scheme_str() == Some("https") {
+                let alternatives = self
+                    .cache
+                    .candidates(&origin)
+                    .into_iter()
+                    .filter(|alternative| {
+                        self.client.as_ref().is_some_and(|client| {
+                            !client.is_broken(&origin, &alternative.authority, proxy.as_ref())
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let mut failed = Vec::new();
+                if self
+                    .prepare_candidates(&origin, alternatives, proxy.as_ref(), &mut failed)
+                    .await
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+                let connection = self
+                    .tcp_preconnect
+                    .connect(origin.clone())
+                    .await
+                    .map_err(error::request)?;
+                self.tcp_preconnect.ready.insert(&origin, connection);
+            } else {
+                let connection = self
+                    .tcp_preconnect
+                    .connect(origin.clone())
+                    .await
+                    .map_err(error::request)?;
+                self.tcp_preconnect.ready.insert(&origin, connection);
+            }
+            Ok(())
+        }
+
         pub(crate) async fn send(
             mut self,
             tcp: HyperClient,
@@ -76,6 +140,12 @@ mod http3 {
                 .proxies
                 .iter()
                 .find_map(|proxy| proxy.intercept(&origin));
+            let generation = self.cache.generation();
+            if let Some(client) = self.client.as_mut() {
+                if client.network_generation(generation) {
+                    self.tcp_preconnect.ready.clear();
+                }
+            }
             let forced = self.prior_knowledge || request.version() == Version::HTTP_3;
             let supports_http3 = proxy.as_ref().is_none_or(|proxy| {
                 cfg!(feature = "socks")
@@ -102,17 +172,49 @@ mod http3 {
                 && request.version() == Version::HTTP_11
                 && !forced
             {
-                if let Some(alternative) = self.cache.get(&origin) {
-                    let prepared = self
-                        .prepare(
+                let alternatives = self
+                    .cache
+                    .candidates(&origin)
+                    .into_iter()
+                    .filter(|alternative| {
+                        !self.client.as_ref().unwrap().is_broken(
                             &origin,
-                            Some(alternative.authority.clone()),
+                            &alternative.authority,
                             proxy.as_ref(),
-                            true,
                         )
-                        .await;
+                    })
+                    .collect::<Vec<_>>();
+                if !alternatives.is_empty() {
+                    let mut failed = Vec::new();
+                    let tcp_prepare = self.tcp_preconnect.clone();
+                    let prepared = {
+                        let h3 = self.prepare_candidates(
+                            &origin,
+                            alternatives,
+                            proxy.as_ref(),
+                            &mut failed,
+                        );
+                        let tcp_connect = async {
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            tcp_prepare.connect(origin.clone()).await
+                        };
+                        tokio::pin!(h3, tcp_connect);
+                        tokio::select! {
+                            result = &mut h3 => match result {
+                                Ok((connection, alternative)) => Prepared::Http3(connection, alternative),
+                                Err(_) => Prepared::Tcp(tcp_connect.await.map_err(error::request)?),
+                            },
+                            result = &mut tcp_connect => match result {
+                                Ok(connection) => Prepared::Tcp(connection),
+                                Err(tcp_error) => match h3.await {
+                                    Ok((connection, alternative)) => Prepared::Http3(connection, alternative),
+                                    Err(_) => return Err(error::request(tcp_error)),
+                                },
+                            },
+                        }
+                    };
                     match prepared {
-                        Ok(connection) => {
+                        Prepared::Http3(connection, alternative) => {
                             let replay = clone_request(&request);
                             *request.version_mut() = Version::HTTP_3;
                             request.headers_mut().insert(
@@ -143,9 +245,6 @@ mod http3 {
                                         alternative.authority,
                                         proxy.as_ref(),
                                     );
-                                    // RFC 7838 permits replay after 421 even for
-                                    // non-idempotent methods, but never replay a
-                                    // consumed streaming body.
                                     if let Some(replay) = replay {
                                         request = replay;
                                     } else {
@@ -156,21 +255,25 @@ mod http3 {
                                     self.observe(&origin, &response, started);
                                     return Ok(response);
                                 }
-                                Err(error) => {
-                                    let error = error::request(error);
-                                    if !crate::retry::is_retryable_error(&error) {
-                                        self.cache.mark_broken(&origin, &alternative);
-                                    }
-                                    // Dispatch has started. A transport failure
-                                    // does not prove the server did not execute
-                                    // a request, so leave retries to the policy.
-                                    return Err(error);
-                                }
+                                Err(error) => return Err(error::request(error)),
                             }
                         }
-                        Err(error) => {
-                            log::debug!("HTTP/3 alternative connection failed: {error}");
-                            self.cache.mark_broken(&origin, &alternative);
+                        Prepared::Tcp(connection) => {
+                            self.tcp_preconnect.ready.insert(&origin, connection);
+                            let response = tcp
+                                .request(request)
+                                .await
+                                .map_err(error::request)?
+                                .map(boxed);
+                            for alternative in failed {
+                                self.client.as_ref().unwrap().confirm_broken(
+                                    &origin,
+                                    alternative,
+                                    proxy.as_ref(),
+                                );
+                            }
+                            self.observe(&origin, &response, started);
+                            return Ok(response);
                         }
                     }
                 }
@@ -194,6 +297,29 @@ mod http3 {
                 .map(boxed);
             self.observe(&origin, &response, started);
             Ok(response)
+        }
+
+        async fn prepare_candidates(
+            &mut self,
+            origin: &Uri,
+            alternatives: Vec<crate::alt_svc::Alternative>,
+            proxy: Option<&crate::proxy::Intercepted>,
+            failed: &mut Vec<http::uri::Authority>,
+        ) -> Result<(PoolClient, crate::alt_svc::Alternative), BoxError> {
+            let mut last: BoxError = "no available HTTP/3 alternative".into();
+            for alternative in alternatives {
+                match self
+                    .prepare(origin, Some(alternative.authority.clone()), proxy, true)
+                    .await
+                {
+                    Ok(connection) => return Ok((connection, alternative)),
+                    Err(error) => {
+                        failed.push(alternative.authority);
+                        last = error.into();
+                    }
+                }
+            }
+            Err(last)
         }
 
         async fn dispatch(

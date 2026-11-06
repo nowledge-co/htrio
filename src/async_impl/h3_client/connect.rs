@@ -14,13 +14,14 @@ use http::Uri;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Endpoint, TransportConfig};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 type H3Connection = (
     h3::client::Connection<Connection, Bytes>,
     SendRequest<OpenStreams, Bytes>,
     Endpoint,
+    quinn::Connection,
 );
 
 const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
@@ -36,6 +37,7 @@ pub(crate) struct H3ClientConfig {
     ///
     pub(crate) max_field_section_size: Option<u64>,
     pub(crate) max_frame_size: Option<u64>,
+    pub(crate) tls_info: bool,
 
     /// Send reserved protocol values to exercise peers' extension handling.
     pub(crate) send_grease: Option<bool>,
@@ -46,6 +48,7 @@ impl Default for H3ClientConfig {
         Self {
             max_field_section_size: None,
             max_frame_size: None,
+            tls_info: false,
             send_grease: None,
         }
     }
@@ -54,7 +57,7 @@ impl Default for H3ClientConfig {
 #[derive(Clone)]
 pub(crate) struct H3Connector {
     resolver: DynResolver,
-    endpoint: Arc<OnceLock<Endpoint>>,
+    endpoint: Arc<Mutex<Option<Endpoint>>>,
     quic_config: ClientConfig,
     client_config: H3ClientConfig,
     local_addr: Option<IpAddr>,
@@ -74,7 +77,7 @@ impl H3Connector {
 
         Ok(Self {
             resolver,
-            endpoint: Arc::new(OnceLock::new()),
+            endpoint: Arc::new(Mutex::new(None)),
             quic_config: config,
             client_config,
             local_addr,
@@ -113,8 +116,19 @@ impl H3Connector {
         self.remote_connect(addrs, server_name).await
     }
 
+    pub(crate) fn tls_info(&self) -> bool {
+        self.client_config.tls_info
+    }
+
+    pub(crate) fn network_changed(&mut self) {
+        // Existing streams retain their endpoint and tunnel. Future connections
+        // bind on the new network without migrating a SOCKS association.
+        self.endpoint.lock().unwrap().take();
+    }
+
     fn endpoint(&self) -> Result<Endpoint, BoxError> {
-        if let Some(endpoint) = self.endpoint.get() {
+        let mut shared = self.endpoint.lock().unwrap();
+        if let Some(endpoint) = shared.as_ref() {
             return Ok(endpoint.clone());
         }
         // Bind lazily inside the request's runtime, so Client::new() also works
@@ -125,12 +139,26 @@ impl H3Connector {
         };
         let mut endpoint = Endpoint::client(socket_addr)?;
         endpoint.set_default_client_config(self.quic_config.clone());
-        let _ = self.endpoint.set(endpoint);
-        Ok(self
-            .endpoint
-            .get()
-            .expect("endpoint was initialized")
-            .clone())
+        *shared = Some(endpoint.clone());
+        Ok(endpoint)
+    }
+
+    pub(crate) fn rebind(&self, socket: std::net::UdpSocket) -> Result<(), BoxError> {
+        socket.set_nonblocking(true)?;
+        let mut shared = self.endpoint.lock().unwrap();
+        if let Some(endpoint) = shared.as_ref() {
+            endpoint.rebind(socket)?;
+        } else {
+            let mut endpoint = Endpoint::new(
+                quinn::EndpointConfig::default(),
+                None,
+                socket,
+                Arc::new(quinn::TokioRuntime),
+            )?;
+            endpoint.set_default_client_config(self.quic_config.clone());
+            *shared = Some(endpoint);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "socks")]
@@ -141,7 +169,7 @@ impl H3Connector {
         port: Option<u16>,
         server_name: &str,
     ) -> Result<H3Connection, BoxError> {
-        use super::socks::{SocksSocket, Target};
+        use super::socks::Target;
         let targets =
             if proxy.uri().scheme_str() == Some("socks5h") && host.parse::<IpAddr>().is_err() {
                 vec![Target::Domain(host.to_owned(), port.unwrap_or(443))]
@@ -152,39 +180,67 @@ impl H3Connector {
                     .map(Target::Ip)
                     .collect()
             };
-        let mut last_error: BoxError = "HTTP/3 target resolved no addresses".into();
-        for target in targets {
-            let (socket, peer) =
-                SocksSocket::connect(proxy, target, &mut self.resolver, self.local_addr).await?;
-            let mut endpoint = Endpoint::new_with_abstract_socket(
-                quinn::EndpointConfig::default(),
-                None,
-                socket.clone(),
-                Arc::new(quinn::TokioRuntime),
-            )?;
-            endpoint.set_default_client_config(self.quic_config.clone());
-            let connection = tokio::select! {
-                result = endpoint.connect(peer, server_name)? => result?,
-                _ = socket.closed() => return Err("SOCKS5 UDP association closed during handshake".into()),
-            };
-            let monitored = connection.clone();
-            match Self::build_h3(&endpoint, connection, &self.client_config).await {
-                Ok(connection) => {
-                    tokio::spawn(async move {
-                        tokio::select! {
-                            _ = monitored.closed() => {},
-                            _ = socket.closed() => monitored.close(0_u32.into(), b"SOCKS5 association closed"),
-                        }
-                    });
-                    return Ok(connection);
-                }
-                Err(error) => {
-                    monitored.close(0_u32.into(), b"HTTP/3 setup failed");
-                    last_error = error;
-                }
+        let mut attempts = tokio::task::JoinSet::new();
+        for (index, target) in targets.into_iter().take(16).enumerate() {
+            let connector = self.clone();
+            let proxy = proxy.clone();
+            let server_name = server_name.to_owned();
+            attempts.spawn(async move {
+                tokio::time::sleep(HAPPY_EYEBALLS_DELAY * index as u32).await;
+                connector
+                    .connect_socks_target(&proxy, target, &server_name)
+                    .await
+            });
+        }
+        let mut last: BoxError = "HTTP/3 target resolved no addresses".into();
+        while let Some(result) = attempts.join_next().await {
+            match result {
+                Ok(Ok(connection)) => return Ok(connection),
+                Ok(Err(error)) => last = error,
+                Err(error) => last = error.into(),
             }
         }
-        Err(last_error)
+        Err(last)
+    }
+
+    #[cfg(feature = "socks")]
+    async fn connect_socks_target(
+        &self,
+        proxy: &crate::proxy::Intercepted,
+        target: super::socks::Target,
+        server_name: &str,
+    ) -> Result<H3Connection, BoxError> {
+        let (socket, peer) = super::socks::SocksSocket::connect(
+            proxy,
+            target,
+            &mut self.resolver.clone(),
+            self.local_addr,
+        )
+        .await?;
+        let mut endpoint = Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            None,
+            socket.clone(),
+            Arc::new(quinn::TokioRuntime),
+        )?;
+        endpoint.set_default_client_config(self.quic_config.clone());
+        let connection = tokio::select! {
+            result = endpoint.connect(peer, server_name)? => result?,
+            _ = socket.closed() => return Err("SOCKS5 UDP association closed during handshake".into()),
+        };
+        let monitored = connection.clone();
+        let result = Self::build_h3(&endpoint, connection, &self.client_config).await;
+        if result.is_err() {
+            monitored.close(0_u32.into(), b"HTTP/3 setup failed");
+            return result;
+        }
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = monitored.closed() => {},
+                _ = socket.closed() => monitored.close(0_u32.into(), b"SOCKS5 association closed"),
+            }
+        });
+        result
     }
 
     async fn remote_connect(
@@ -192,95 +248,51 @@ impl H3Connector {
         addrs: Vec<SocketAddr>,
         server_name: &str,
     ) -> Result<H3Connection, BoxError> {
-        if addrs.is_empty() {
-            return Err("no addresses to connect to".into());
-        }
         let endpoint = self.endpoint()?;
-
-        let (mut ipv6_addrs, mut ipv4_addrs): (Vec<SocketAddr>, Vec<SocketAddr>) =
-            addrs.into_iter().partition(|addr| addr.is_ipv6());
-
-        if let Some(local_ip) = self.local_addr {
-            if local_ip.is_ipv6() {
-                ipv4_addrs.clear();
+        let mut ipv6 = addrs.iter().copied().filter(|addr| addr.is_ipv6());
+        let mut ipv4 = addrs.iter().copied().filter(|addr| addr.is_ipv4());
+        let prefer_v6 = addrs.first().is_some_and(SocketAddr::is_ipv6);
+        let mut ordered = Vec::new();
+        loop {
+            let (first, second) = if prefer_v6 {
+                (ipv6.next(), ipv4.next())
             } else {
-                ipv6_addrs.clear();
-            }
-        }
-
-        if ipv6_addrs.is_empty() {
-            return Self::try_addresses_static(
-                &endpoint,
-                &ipv4_addrs,
-                server_name,
-                &self.client_config,
-            )
-            .await;
-        }
-        if ipv4_addrs.is_empty() {
-            return Self::try_addresses_static(
-                &endpoint,
-                &ipv6_addrs,
-                server_name,
-                &self.client_config,
-            )
-            .await;
-        }
-
-        let client_config = self.client_config.clone();
-
-        if self.local_addr.is_some() {
-            return match Self::try_addresses_static(
-                &endpoint,
-                &ipv6_addrs,
-                server_name,
-                &client_config,
-            )
-            .await
-            {
-                Ok(conn) => Ok(conn),
-                Err(_) => {
-                    Self::try_addresses_static(&endpoint, &ipv4_addrs, server_name, &client_config)
-                        .await
-                }
+                (ipv4.next(), ipv6.next())
             };
+            if first.is_none() && second.is_none() {
+                break;
+            }
+            ordered.extend(first);
+            ordered.extend(second);
         }
-
-        Self::try_addresses_happy_eyeballs(
-            &endpoint,
-            &ipv6_addrs,
-            &ipv4_addrs,
-            server_name,
-            &client_config,
-        )
-        .await
-    }
-
-    async fn try_addresses_static(
-        endpoint: &Endpoint,
-        addrs: &[SocketAddr],
-        server_name: &str,
-        client_config: &H3ClientConfig,
-    ) -> Result<H3Connection, BoxError> {
-        let mut last_err: Option<BoxError> = None;
-
-        for addr in addrs {
-            match endpoint.connect(*addr, server_name) {
-                Ok(connecting) => match connecting.await {
-                    Ok(new_conn) => {
-                        return Self::build_h3(endpoint, new_conn, client_config).await;
-                    }
-                    Err(e) => {
-                        last_err = Some(Box::new(e) as BoxError);
-                    }
-                },
-                Err(e) => {
-                    last_err = Some(Box::new(e) as BoxError);
-                }
+        let mut attempts = tokio::task::JoinSet::new();
+        for (index, address) in ordered
+            .into_iter()
+            .filter(|addr| {
+                self.local_addr
+                    .is_none_or(|ip| ip.is_ipv4() == addr.is_ipv4())
+            })
+            .take(16)
+            .enumerate()
+        {
+            let endpoint = endpoint.clone();
+            let config = self.client_config.clone();
+            let server_name = server_name.to_owned();
+            attempts.spawn(async move {
+                tokio::time::sleep(HAPPY_EYEBALLS_DELAY * index as u32).await;
+                let connection = endpoint.connect(address, &server_name)?.await?;
+                Self::build_h3(&endpoint, connection, &config).await
+            });
+        }
+        let mut last: BoxError = "no compatible addresses to connect to".into();
+        while let Some(result) = attempts.join_next().await {
+            match result {
+                Ok(Ok(connection)) => return Ok(connection),
+                Ok(Err(error)) => last = error,
+                Err(error) => last = error.into(),
             }
         }
-
-        Err(last_err.unwrap_or_else(|| "no addresses available".into()))
+        Err(last)
     }
 
     async fn build_h3(
@@ -299,59 +311,7 @@ impl H3Connector {
         if let Some(grease) = config.send_grease {
             builder.send_grease(grease);
         }
-        let (driver, sender) = builder.build(Connection::new(connection)).await?;
-        Ok((driver, sender, endpoint.clone()))
-    }
-
-    async fn try_addresses_happy_eyeballs(
-        endpoint: &Endpoint,
-        ipv6_addrs: &[SocketAddr],
-        ipv4_addrs: &[SocketAddr],
-        server_name: &str,
-        client_config: &H3ClientConfig,
-    ) -> Result<H3Connection, BoxError> {
-        let ipv6_connect =
-            Self::try_addresses_static(endpoint, ipv6_addrs, server_name, client_config);
-        tokio::pin!(ipv6_connect);
-
-        let delay = tokio::time::sleep(HAPPY_EYEBALLS_DELAY);
-        tokio::pin!(delay);
-
-        tokio::select! {
-            result = &mut ipv6_connect => {
-                return match result {
-                    Ok(conn) => Ok(conn),
-                    Err(_) => {
-                        Self::try_addresses_static(endpoint, ipv4_addrs, server_name, client_config).await
-                    }
-                };
-            }
-            _ = &mut delay => {}
-        }
-
-        let ipv4_connect =
-            Self::try_addresses_static(endpoint, ipv4_addrs, server_name, client_config);
-        tokio::pin!(ipv4_connect);
-
-        let wait_for_ipv6 = tokio::select! {
-            result = &mut ipv6_connect => {
-                match result {
-                    Ok(conn) => return Ok(conn),
-                    Err(_) => false,
-                }
-            }
-            result = &mut ipv4_connect => {
-                match result {
-                    Ok(conn) => return Ok(conn),
-                    Err(_) => true,
-                }
-            }
-        };
-
-        if wait_for_ipv6 {
-            ipv6_connect.await
-        } else {
-            ipv4_connect.await
-        }
+        let (driver, sender) = builder.build(Connection::new(connection.clone())).await?;
+        Ok((driver, sender, endpoint.clone(), connection))
     }
 }
