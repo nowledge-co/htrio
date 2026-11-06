@@ -27,7 +27,7 @@ impl Header {
             value.is_sensitive()
                 || matches!(
                     name.as_str(),
-                    "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+                    "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
                 )
         })
     }

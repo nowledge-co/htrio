@@ -1,7 +1,7 @@
 [package]
 publish = false
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 name = "htrio-quinn-udp"
 version = "0.5.16"
 build = "build.rs"

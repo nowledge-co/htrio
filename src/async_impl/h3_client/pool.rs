@@ -220,6 +220,7 @@ impl Pool {
         }
         connection.idle_timeout = Instant::now();
         connection.client.info.coalesced = true;
+        connection.client.key = key.clone();
         let client = connection.client.clone();
         inner.insert(key, connection);
         Some(client)
@@ -236,6 +237,7 @@ impl Pool {
             connecting: inner.connecting.len(),
             available,
             retiring: inner.idle_conns.len() - available,
+            ..Default::default()
         }
     }
 
@@ -290,7 +292,15 @@ impl Pool {
 
         // We clean up "connecting" here so we don't have to acquire the lock again.
         let (key, generation) = lock.forget();
-        let client = PoolClient::new(tx, connection, direct, connect_time, tls_info, early);
+        let client = PoolClient::new(
+            tx,
+            connection,
+            direct,
+            connect_time,
+            tls_info,
+            early,
+            key.clone(),
+        );
         if generation != inner.generation {
             return client;
         }
@@ -354,18 +364,20 @@ impl PoolInner {
 
 #[derive(Clone)]
 pub struct PoolClient {
+    pub(super) key: Key,
     inner: SendRequest<OpenStreams, Bytes>,
     pub(super) info: crate::http3::ConnectionInfo,
 }
 
 impl PoolClient {
-    pub fn new(
+    fn new(
         tx: SendRequest<OpenStreams, Bytes>,
         connection: quinn::Connection,
         direct: bool,
         connect_time: Duration,
         tls_info: bool,
         early: super::session::EarlyData,
+        key: Key,
     ) -> Self {
         let info = crate::http3::ConnectionInfo {
             connection,
@@ -376,8 +388,14 @@ impl PoolClient {
             coalesced: false,
             early,
             early_data_used: false,
+            dispatched: Default::default(),
+            reused: false,
         };
-        Self { inner: tx, info }
+        Self {
+            inner: tx,
+            info,
+            key,
+        }
     }
 
     pub async fn send_request(
@@ -468,6 +486,11 @@ impl PoolClient {
             }
             Err(error) => return Err(error.into()),
         };
+        let reused = self
+            .info
+            .dispatched
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            != 0;
         let priority = crate::http3::RequestPriority {
             handle: stream.priority_handle(),
             connection: self.info.connection.clone(),
@@ -513,7 +536,9 @@ impl PoolClient {
                 }
             }
         };
-        response.extensions_mut().insert(self.info.clone());
+        let mut info = self.info.clone();
+        info.reused = reused;
+        response.extensions_mut().insert(info);
         response.extensions_mut().insert(priority);
         if self.info.tls_info {
             if let Some(identity) = self.info.connection.peer_identity() {

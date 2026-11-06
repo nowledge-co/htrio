@@ -776,3 +776,99 @@ async fn cross_origin_coalescing_is_opt_in_and_rechecks_certificate_authority() 
         response.bytes().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn preconnected_sockets_do_not_retain_a_connector_layer_readiness_permit() {
+    let server = LocalServer::with_names(&["origin.test", "second.test"], |_, _| {
+        Response::new(Bytes::new())
+    })
+    .await;
+    let client = server
+        .client_builder()
+        .resolve("second.test", server.addr)
+        .connector_layer(tower::limit::ConcurrencyLimitLayer::new(1))
+        .build()
+        .unwrap();
+    client.preconnect(server.url("/warm")).await.unwrap();
+    client
+        .get(server.url("/warm"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let second = format!("https://second.test:{}/warm", server.addr.port());
+    tokio::time::timeout(Duration::from_secs(2), client.preconnect(&second))
+        .await
+        .unwrap()
+        .unwrap();
+    client
+        .get(second)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_tcp_winner_qualifies_failed_quic_in_a_bounded_request_free_probe() {
+    let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = blackhole.local_addr().unwrap().port();
+    let server = LocalServer::new(move |request, _| advertise(request, port)).await;
+    let client = server
+        .client_builder()
+        .http3_connect_timeout(Duration::from_millis(500))
+        .build()
+        .unwrap();
+    client
+        .get(server.url("/seed"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let response = client
+        .post(server.url("/race"))
+        .body("once")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response
+            .extensions()
+            .get::<htrio::http3::TransportInfo>()
+            .unwrap()
+            .selection,
+        htrio::http3::TransportSelection::TcpRace
+    );
+    response.bytes().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while client.http3_pool_stats().probing != 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(client.http3_pool_stats().broken_routes, 1);
+    let response = tokio::time::timeout(
+        Duration::from_millis(200),
+        client.get(server.url("/backoff")).send(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        response
+            .extensions()
+            .get::<htrio::http3::TransportInfo>()
+            .unwrap()
+            .selection,
+        htrio::http3::TransportSelection::Origin
+    );
+    response.bytes().await.unwrap();
+    assert_eq!(server.requests().len(), 3);
+}

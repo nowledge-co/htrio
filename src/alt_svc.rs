@@ -23,7 +23,8 @@ const BROKEN_BACKOFF: Duration = Duration::from_secs(300);
 ///
 /// Entries are scoped to the HTTPS origin's host and effective port. Cache
 /// controls affect future route selection; they do not close active connections.
-/// HTTP/2 ALTSVC frames are not implemented; persistence uses explicit snapshots.
+/// Authenticated response headers and HTTP/2 ALTSVC frames share this cache.
+/// Persistence uses explicit, application-owned snapshots.
 #[derive(Clone, Debug)]
 pub struct AltSvcCache {
     inner: Arc<Mutex<State>>,
@@ -670,5 +671,52 @@ mod tests {
             Duration::ZERO,
         );
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn snapshots_preserve_freshness_and_validate_imported_records() {
+        let source = AltSvcCache::new();
+        learn(&source, "https://one.test/", "h3=\":8443\";ma=60;persist=1");
+        let records = source.snapshot();
+        let restored = AltSvcCache::new();
+        restored.restore(records.clone());
+        let snapshot = restored.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].origin, records[0].origin);
+        assert_eq!(snapshot[0].authority, records[0].authority);
+        assert!(snapshot[0].persist);
+        assert!(snapshot[0].expires_at <= records[0].expires_at);
+        restored.network_changed();
+        assert_eq!(restored.len(), 1);
+        for (origin, authority, expires_at) in [
+            (
+                "http://one.test",
+                "one.test:443",
+                SystemTime::now() + Duration::from_secs(60),
+            ),
+            (
+                "https://one.test",
+                "user@one.test:443",
+                SystemTime::now() + Duration::from_secs(60),
+            ),
+            ("https://one.test", "one.test:443", SystemTime::UNIX_EPOCH),
+        ] {
+            let cache = AltSvcCache::new();
+            cache.restore([Record {
+                origin: origin.into(),
+                authority: authority.into(),
+                expires_at,
+                persist: false,
+            }]);
+            assert!(cache.is_empty());
+        }
+        let bounded = AltSvcCache::with_capacity(1);
+        bounded.restore((0..100).map(|index| Record {
+            origin: format!("https://origin{index}.test"),
+            authority: "alternative.test:443".into(),
+            expires_at: SystemTime::now() + Duration::from_secs(60),
+            persist: false,
+        }));
+        assert_eq!(bounded.len(), 1);
     }
 }

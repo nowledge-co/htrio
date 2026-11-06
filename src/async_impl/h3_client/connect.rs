@@ -27,6 +27,12 @@ type H3Connection = (
 
 const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
 
+#[derive(Default)]
+struct DirectEndpoint {
+    active: Option<(Endpoint, tokio::runtime::Handle)>,
+    pending_socket: Option<std::net::UdpSocket>,
+}
+
 /// HTTP/3 settings applied to direct and tunneled connections.
 #[derive(Clone)]
 pub(crate) struct H3ClientConfig {
@@ -66,12 +72,13 @@ impl Default for H3ClientConfig {
 #[derive(Clone)]
 pub(crate) struct H3Connector {
     resolver: DynResolver,
-    endpoint: Arc<Mutex<Option<Endpoint>>>,
+    endpoint: Arc<Mutex<DirectEndpoint>>,
     quic_config: ClientConfig,
     tls: Arc<rustls::ClientConfig>,
     transport: Arc<TransportConfig>,
     client_config: H3ClientConfig,
     local_addr: Option<IpAddr>,
+    network_epoch: Arc<std::sync::atomic::AtomicU64>,
     routes:
         Arc<Mutex<std::collections::HashMap<super::pool::Key, Arc<super::session::RouteState>>>>,
     services: Arc<
@@ -100,7 +107,7 @@ impl H3Connector {
 
         Ok(Self {
             resolver,
-            endpoint: Arc::new(Mutex::new(None)),
+            endpoint: Default::default(),
             quic_config: config,
             tls,
             transport,
@@ -108,6 +115,7 @@ impl H3Connector {
             local_addr,
             services: Default::default(),
             routes: Default::default(),
+            network_epoch: Default::default(),
         })
     }
 
@@ -137,25 +145,50 @@ impl H3Connector {
         if host.parse::<IpAddr>().is_ok() || host.starts_with('[') {
             return Ok(Vec::new());
         }
+        let epoch = self
+            .network_epoch
+            .load(std::sync::atomic::Ordering::Relaxed);
         let mut endpoints = self
             .resolver
             .resolve_service(host, origin.port_u16().unwrap_or(443))
             .await?;
-        endpoints.truncate(8);
+        if epoch
+            != self
+                .network_epoch
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(Vec::new());
+        }
+        endpoints.truncate(16);
+        for endpoint in &mut endpoints {
+            endpoint.addresses.truncate(16);
+            // Keep ECH present on unusable records so selection fails closed.
+            if endpoint
+                .ech_config_list
+                .as_ref()
+                .is_some_and(|ech| ech.len() > 16 * 1024)
+            {
+                endpoint.ech_config_list = Some(Vec::new());
+            }
+        }
         endpoints.retain(|endpoint| {
             endpoint.priority != 0
                 && endpoint.port != 0
                 && !endpoint.ttl.is_zero()
                 && endpoint.alpn.iter().any(|alpn| alpn == b"h3")
-                && endpoint
-                    .ech_config_list
-                    .as_ref()
-                    .is_none_or(|ech| ech.len() <= 16 * 1024)
+                && !endpoint.target.contains('@')
                 && format!("{}:{}", endpoint.target, endpoint.port)
                     .parse::<http::uri::Authority>()
                     .is_ok()
         });
+        if endpoints
+            .iter()
+            .any(|endpoint| endpoint.ech_config_list.is_some())
+        {
+            endpoints.retain(|endpoint| endpoint.ech_config_list.is_some());
+        }
         endpoints.sort_by_key(|endpoint| endpoint.priority);
+        endpoints.truncate(8);
         let ttl = endpoints
             .iter()
             .map(|endpoint| endpoint.ttl)
@@ -163,6 +196,13 @@ impl H3Connector {
             .unwrap_or(Duration::from_secs(60))
             .min(Duration::from_secs(86_400));
         let mut cache = self.services.lock().unwrap();
+        if epoch
+            != self
+                .network_epoch
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(Vec::new());
+        }
         cache.retain(|_, (expiry, _)| *expiry > std::time::Instant::now());
         if cache.len() >= 256 {
             if let Some(oldest) = cache.keys().next().cloned() {
@@ -269,23 +309,13 @@ impl H3Connector {
         Ok(route)
     }
 
-    fn route_config(
+    fn route_tls(
         &self,
         service: Option<&crate::dns::ServiceEndpoint>,
         route: &super::session::RouteState,
-    ) -> Result<ClientConfig, BoxError> {
-        let key = service.and_then(|service| service.ech_config_list.clone());
-        let mut cached = route.quic.lock().unwrap();
-        if let Some((previous, config)) = cached.as_ref().filter(|(previous, _)| previous == &key) {
-            let _ = previous;
-            return Ok(config.clone());
-        }
+    ) -> Result<Arc<rustls::ClientConfig>, BoxError> {
         let Some(ech) = service.and_then(|service| service.ech_config_list.as_ref()) else {
-            let mut config =
-                ClientConfig::new(Arc::new(QuicClientConfig::try_from(route.tls.clone())?));
-            config.transport_config(self.transport.clone());
-            *cached = Some((key, config.clone()));
-            return Ok(config);
+            return Ok(route.tls.clone());
         };
         let verifier = self
             .client_config
@@ -307,7 +337,22 @@ impl H3Connector {
         tls.key_log = self.tls.key_log.clone();
         tls.enable_early_data = self.tls.enable_early_data;
         tls.max_fragment_size = self.tls.max_fragment_size;
-        let mut config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls)?));
+        Ok(Arc::new(tls))
+    }
+
+    fn route_config(
+        &self,
+        service: Option<&crate::dns::ServiceEndpoint>,
+        route: &super::session::RouteState,
+    ) -> Result<ClientConfig, BoxError> {
+        let key = service.and_then(|service| service.ech_config_list.clone());
+        let mut cached = route.quic.lock().unwrap();
+        if let Some((_, config)) = cached.as_ref().filter(|(previous, _)| previous == &key) {
+            return Ok(config.clone());
+        }
+        let mut config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(
+            self.route_tls(service, route)?,
+        )?));
         config.transport_config(self.transport.clone());
         *cached = Some((key, config.clone()));
         Ok(config)
@@ -389,7 +434,10 @@ impl H3Connector {
     pub(crate) fn network_changed(&mut self) {
         // Existing streams retain their endpoint and tunnel. Future connections
         // bind on the new network without migrating a SOCKS association.
-        self.endpoint.lock().unwrap().take();
+        self.network_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.resolver.clear_cache();
+        *self.endpoint.lock().unwrap() = DirectEndpoint::default();
         self.services.lock().unwrap().clear();
         for route in self.routes.lock().unwrap().values() {
             route.quic.lock().unwrap().take();
@@ -398,7 +446,7 @@ impl H3Connector {
 
     fn endpoint(&self) -> Result<Endpoint, BoxError> {
         let mut shared = self.endpoint.lock().unwrap();
-        if let Some(endpoint) = shared.as_ref() {
+        if let Some((endpoint, _)) = shared.active.as_ref() {
             return Ok(endpoint.clone());
         }
         // Bind lazily inside the request's runtime, so Client::new() also works
@@ -407,26 +455,31 @@ impl H3Connector {
             Some(ip) => SocketAddr::new(ip, 0),
             None => "[::]:0".parse::<SocketAddr>().unwrap(),
         };
-        let mut endpoint = Endpoint::client(socket_addr)?;
+        let runtime = tokio::runtime::Handle::try_current()?;
+        let mut endpoint = match shared.pending_socket.take() {
+            Some(socket) => Endpoint::new(
+                quinn::EndpointConfig::default(),
+                None,
+                socket,
+                Arc::new(quinn::TokioRuntime),
+            )?,
+            None => Endpoint::client(socket_addr)?,
+        };
         endpoint.set_default_client_config(self.quic_config.clone());
-        *shared = Some(endpoint.clone());
+        shared.active = Some((endpoint.clone(), runtime));
         Ok(endpoint)
     }
 
     pub(crate) fn rebind(&self, socket: std::net::UdpSocket) -> Result<(), BoxError> {
         socket.set_nonblocking(true)?;
         let mut shared = self.endpoint.lock().unwrap();
-        if let Some(endpoint) = shared.as_ref() {
+        if let Some((endpoint, runtime)) = shared.active.as_ref() {
+            // Register with the endpoint's runtime even when the caller is on
+            // an application thread, or currently inside a different runtime.
+            let _enter = runtime.enter();
             endpoint.rebind(socket)?;
         } else {
-            let mut endpoint = Endpoint::new(
-                quinn::EndpointConfig::default(),
-                None,
-                socket,
-                Arc::new(quinn::TokioRuntime),
-            )?;
-            endpoint.set_default_client_config(self.quic_config.clone());
-            *shared = Some(endpoint);
+            shared.pending_socket = Some(socket);
         }
         Ok(())
     }
@@ -618,5 +671,69 @@ impl H3Connector {
         }
         let (driver, sender) = builder.build(Connection::new(connection.clone())).await?;
         Ok((driver, sender, endpoint.clone(), connection, early))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn discovered_ech_encrypts_the_origin_name_in_the_quic_client_hello() {
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let identity =
+            rcgen::generate_simple_self_signed(vec!["private-origin.test".into()]).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(identity.cert.der().clone()).unwrap();
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            provider.clone(),
+        )
+        .build()
+        .unwrap();
+        let tls = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier.clone())
+            .with_no_client_auth();
+        let config = H3ClientConfig {
+            verifier: Some(verifier),
+            ..Default::default()
+        };
+        let connector = H3Connector::new(
+            DynResolver::new(Arc::new(crate::dns::gai::GaiResolver::new())),
+            tls,
+            None,
+            TransportConfig::default(),
+            config,
+        )
+        .unwrap();
+        let route = super::super::session::RouteState::new(&connector.tls, true);
+        let mut contents = vec![0, 0, 0x20, 0, 32];
+        contents.extend_from_slice(&[9]);
+        contents.extend_from_slice(&[0; 31]);
+        contents.extend_from_slice(&[0, 4, 0, 1, 0, 1, 0, 11]);
+        contents.extend_from_slice(b"public.test");
+        contents.extend_from_slice(&[0, 0]);
+        let mut config = vec![0xfe, 0x0d];
+        config.extend_from_slice(&(contents.len() as u16).to_be_bytes());
+        config.extend_from_slice(&contents);
+        let mut list = (config.len() as u16).to_be_bytes().to_vec();
+        list.extend_from_slice(&config);
+        let mut endpoint = crate::dns::ServiceEndpoint::http3("service.test", 443);
+        endpoint.ech_config_list = Some(list);
+        let tls = connector.route_tls(Some(&endpoint), &route).unwrap();
+        let name = rustls::pki_types::ServerName::try_from("private-origin.test").unwrap();
+        let mut session =
+            rustls::quic::ClientConnection::new(tls, rustls::quic::Version::V1, name, Vec::new())
+                .unwrap();
+        let mut hello = Vec::new();
+        session.write_hs(&mut hello);
+        assert!(hello
+            .windows(b"public.test".len())
+            .any(|bytes| bytes == b"public.test"));
+        assert!(!hello
+            .windows(b"private-origin.test".len())
+            .any(|bytes| bytes == b"private-origin.test"));
     }
 }

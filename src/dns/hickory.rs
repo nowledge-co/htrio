@@ -26,6 +26,11 @@ struct SocketAddrs {
 }
 
 impl Resolve for HickoryDnsResolver {
+    fn clear_cache(&self) {
+        if let Some(resolver) = self.state.get() {
+            resolver.clear_cache();
+        }
+    }
     fn resolve(&self, name: Name) -> Resolving {
         let resolver = self.clone();
         Box::pin(async move {

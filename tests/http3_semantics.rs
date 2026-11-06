@@ -361,6 +361,13 @@ async fn preconnect_rebind_and_network_change_preserve_protocol_boundaries() {
     })
     .await;
     let client = server.client_builder().tls_info(true).build().unwrap();
+    let outside_runtime = client.clone();
+    std::thread::spawn(move || {
+        outside_runtime.http3_rebind(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+    })
+    .join()
+    .unwrap()
+    .unwrap();
     client.preconnect(server.url("/")).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(client.http3_pool_stats().available, 1);
@@ -378,11 +385,31 @@ async fn preconnect_rebind_and_network_change_preserve_protocol_boundaries() {
         .unwrap()
         .clone();
     assert!(info.stats().udp_rx.datagrams > 0);
-    response.bytes().await.unwrap();
-    client
-        .http3_rebind(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+    assert!(!info.is_reused());
+    let transport = response
+        .extensions()
+        .get::<htrio::http3::TransportInfo>()
         .unwrap();
+    assert_eq!(
+        transport.selection,
+        htrio::http3::TransportSelection::ExplicitHttp3
+    );
+    assert_eq!(transport.protocol, http::Version::HTTP_3);
+    assert_eq!(transport.recovery, None);
+    response.bytes().await.unwrap();
+    let outside_runtime = client.clone();
+    std::thread::spawn(move || {
+        outside_runtime.http3_rebind(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+    })
+    .join()
+    .unwrap()
+    .unwrap();
     let response = client.get(server.url("/migrated")).send().await.unwrap();
+    assert!(response
+        .extensions()
+        .get::<htrio::http3::ConnectionInfo>()
+        .unwrap()
+        .is_reused());
     assert_eq!(
         response
             .extensions()
@@ -698,6 +725,14 @@ async fn rejected_early_data_recovers_once_without_replaying_an_executed_request
     assert!(!info.used_early_data());
     assert_eq!(info.session_stats().early_attempts, 1);
     assert_eq!(info.session_stats().early_rejections, 1);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<htrio::http3::TransportInfo>()
+            .unwrap()
+            .recovery,
+        Some(htrio::http3::RecoveryReason::EarlyDataRejected)
+    );
     response.bytes().await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
@@ -736,6 +771,14 @@ async fn too_early_status_retries_once_after_a_confirmed_handshake() {
     client.network_changed();
     let response = client.get("https://origin.test/425").send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<htrio::http3::TransportInfo>()
+            .unwrap()
+            .recovery,
+        Some(htrio::http3::RecoveryReason::EarlyDataRejected)
+    );
     assert!(!response
         .extensions()
         .get::<htrio::http3::ConnectionInfo>()
@@ -743,6 +786,77 @@ async fn too_early_status_retries_once_after_a_confirmed_handshake() {
         .used_early_data());
     response.bytes().await.unwrap();
     assert_eq!(*observed.lock().unwrap(), [false, true, false]);
+}
+
+#[cfg(feature = "blocking")]
+#[tokio::test]
+async fn blocking_http3_maintenance_uses_its_owned_runtime() {
+    let server = Server::new(|request, mut stream| async move {
+        assert_eq!(request.headers()["priority"], "u=1, i");
+        stream.send_response(Response::new(())).await.unwrap();
+        stream
+            .send_data(Bytes::from_static(b"blocking h3"))
+            .await
+            .unwrap();
+        stream.finish().await.unwrap();
+    })
+    .await;
+    let certificate = htrio::Certificate::from_der(server.certificate.as_ref()).unwrap();
+    let address = server.address;
+    let url = server.url("/blocking");
+    tokio::task::spawn_blocking(move || {
+        let client = htrio::blocking::Client::builder()
+            .no_proxy()
+            .http3_prior_knowledge()
+            .tls_certs_only([certificate])
+            .resolve("origin.test", address)
+            .tls_early_data(false)
+            .http3_coalescing(false)
+            .http3_max_frame_size(65536)
+            .http3_qpack(0, 0)
+            .http3_transport_config(Default::default())
+            .http3_keep_alive_interval(Some(Duration::from_secs(1)))
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        client
+            .http3_rebind(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+            .unwrap();
+        client.preconnect(&url).unwrap();
+        assert_eq!(client.http3_pool_stats().available, 1);
+        let response = client
+            .get(&url)
+            .priority(htrio::http3::Priority::new(1, true).unwrap())
+            .send()
+            .unwrap();
+        let info = response
+            .extensions()
+            .get::<htrio::http3::ConnectionInfo>()
+            .unwrap()
+            .clone();
+        assert_eq!(response.text().unwrap(), "blocking h3");
+        client
+            .http3_rebind(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+            .unwrap();
+        let response = client
+            .get(&url)
+            .priority(htrio::http3::Priority::new(1, true).unwrap())
+            .send()
+            .unwrap();
+        assert_eq!(
+            response
+                .extensions()
+                .get::<htrio::http3::ConnectionInfo>()
+                .unwrap()
+                .id(),
+            info.id()
+        );
+        assert_eq!(response.text().unwrap(), "blocking h3");
+        client.network_changed();
+        assert_eq!(client.http3_pool_stats().available, 0);
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

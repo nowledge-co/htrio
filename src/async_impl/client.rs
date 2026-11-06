@@ -1132,7 +1132,15 @@ impl ClientBuilder {
 
         let connector = connector_builder.build(config.connector_layers);
         #[cfg(feature = "http3")]
-        let (connector, tcp_preconnect) = connector.with_preconnect();
+        let discover = h3_network_supported
+            && config.alt_svc
+            && config.tls_sni
+            && config.hostname_verification
+            && config.certs_verification
+            && matches!(config.http_version_pref, HttpVersionPref::All);
+        #[cfg(feature = "http3")]
+        let (connector, tcp_preconnect) =
+            connector.with_preconnect(discover.then(|| config.alt_svc_cache.clone()));
         let hyper_client = builder.build(connector);
         #[cfg(feature = "http3")]
         let http3 = super::transport::Http3Transport {
@@ -1140,12 +1148,7 @@ impl ClientBuilder {
                 .map(|connector| H3Client::new(connector, config.pool_idle_timeout)),
             tcp_preconnect,
             cache: config.alt_svc_cache.clone(),
-            discover: h3_network_supported
-                && config.alt_svc
-                && config.tls_sni
-                && config.hostname_verification
-                && config.certs_verification
-                && matches!(config.http_version_pref, HttpVersionPref::All),
+            discover,
             prior_knowledge: matches!(config.http_version_pref, HttpVersionPref::Http3),
             proxies: proxies.clone(),
             connect_timeout: config.connect_timeout,

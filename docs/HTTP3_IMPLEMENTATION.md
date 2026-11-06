@@ -21,39 +21,41 @@ aliases, preserved upstream licenses, and recorded upstream revisions.
 ### 1. Local transport ownership and correctness
 
 - [x] Import pinned Quinn 0.11.12, quinn-proto 0.11.19, and quinn-udp 0.5.16.
-- [ ] Verify one local protocol/transport type graph, licenses, MSRV, and CI.
-- [ ] Consume informational responses until final response; reject HTTP/3 101.
-- [ ] Retire GOAWAY connections from reuse and safely reconnect before dispatch.
-- [ ] Cancel upload tasks and source reads on request/response cancellation.
-- [ ] Preserve request and response trailers and validate the final frame sequence.
-- [ ] Enforce content lengths with HEAD/status exceptions and remaining size hints.
-- [ ] Bound encoded/decoded headers and control frames; skip unknown frames incrementally.
-- [ ] Add integration coverage for each boundary and run exact-commit CI.
+- [x] Verify one local protocol/transport type graph, licenses, MSRV, and CI.
+- [x] Consume informational responses until final response; reject HTTP/3 101.
+- [x] Retire GOAWAY connections from reuse and safely reconnect before dispatch.
+- [x] Cancel upload tasks and source reads on request/response cancellation.
+- [x] Preserve request and response trailers and validate the final frame sequence.
+- [x] Enforce content lengths with HEAD/status exceptions and remaining size hints.
+- [x] Bound encoded/decoded headers and control frames; skip unknown frames incrementally.
+- [x] Add integration coverage for each boundary and run exact-commit CI.
 
 ### 2. Connection establishment and recovery
 
-- [ ] Race H3/TCP connection readiness without consuming or duplicating bodies.
-- [ ] Rotate alternative services and race/continue resolved target candidates.
-- [ ] Scope broken-route recovery by failure kind and network/proxy context.
-- [ ] Discover HTTPS/SVCB ALPN/service endpoints and apply ECH configuration.
-- [ ] Support custom service-endpoint metadata and compatible address overrides.
-- [ ] Add network-change/rebinding APIs and preserve tunnels during recovery.
+- [x] Race H3/TCP connection readiness without consuming or duplicating bodies.
+- [x] Rotate alternative services and race/continue resolved target candidates.
+- [x] Scope broken-route recovery by failure kind and network/proxy context.
+- [x] Discover HTTPS/SVCB ALPN/service endpoints and apply ECH configuration.
+- [x] Support custom service-endpoint metadata and compatible address overrides.
+- [x] Add network-change/rebinding APIs and preserve tunnels during recovery.
 
 ### 3. HTTP/3 protocol performance and reuse
 
-- [ ] Implement opt-in 0-RTT with remembered SETTINGS, rejection handling, and replay policy.
-- [ ] Integrate bounded dynamic QPACK encoder/decoder streams and acknowledgements.
-- [ ] Map request priority to HTTP priority updates and QUIC stream scheduling.
-- [ ] Add opt-in authenticated cross-origin connection coalescing.
-- [ ] Add preconnection, keepalive, and application-controlled persistence hooks.
+- [x] Implement opt-in 0-RTT with remembered SETTINGS, rejection handling, and replay policy.
+- [x] Integrate bounded dynamic QPACK encoder/decoder streams and acknowledgements.
+- [x] Map request priority to HTTP priority updates and QUIC stream scheduling.
+- [x] Add opt-in authenticated cross-origin connection coalescing.
+- [x] Add preconnection, keepalive, and application-controlled persistence hooks.
 
 ### 4. Observability and qualification
 
-- [ ] Expose connection timing, RTT/loss/congestion, pool/fallback reasons, and qlog hooks.
-- [ ] Expose HTTP/3 TLS and network peer metadata without virtual proxy addresses.
+- [x] Expose connection timing, RTT/loss/congestion and qlog hooks.
+- [ ] Qualify per-hop selection/recovery/reuse metadata and background route probes.
+- [x] Expose HTTP/3 TLS and network peer metadata without virtual proxy addresses.
 - [ ] Document native APIs, defaults, operational bounds, and remaining limitations.
-- [ ] Qualify default, native TLS, HTTP/3-disabled, and plain HTTP profiles in CI.
-- [ ] Qualify inherited h3/Quinn/protocol/UDP tests with bounded concurrency.
+- [x] Qualify default, native TLS, HTTP/3-disabled, and plain HTTP profiles in CI.
+- [x] Qualify inherited h3/Quinn/protocol/UDP tests with bounded concurrency.
+- [ ] Qualify authenticated HTTP/2 ALTSVC frame discovery and blocking maintenance APIs.
 
 ## Acceptance
 
@@ -108,3 +110,19 @@ defaults. Full Mem application integration is a separate qualification.
   a single confirmed rejection/425 retry, and reduced-SETTINGS rejection. A local
   delayed UDP relay exercises data dispatched before confirmation, TLS rejection,
   HTTP 425, unsafe request gating, and changed server SETTINGS.
+- `8a6ecf0`: all seven exact-commit CI jobs passed, including replay-gated 0-RTT,
+  rejection/425 recovery, and reduced-SETTINGS rejection.
+- Final qualification batch: authenticated HTTP/2 ALTSVC observation without a
+  Hyper fork; compatible DNS cache invalidation; ECH ClientHello wire regression;
+  per-hop selection/recovery/reuse diagnostics; bounded post-TCP QUIC probes;
+  runtime-independent socket rebinding; blocking API parity; persistence bounds.
+  This batch is pending its exact-commit CI.
+
+## Deliberate boundaries
+
+Chromium's browser profile, OS network detection, disk cache, and field-trial
+defaults are application policy. Early data and origin coalescing are opt-in;
+network notification and cache persistence are explicit APIs. ECH ClientHello
+encryption and rejection/privacy boundaries have executable coverage; successful
+interoperation with a separate production ECH server is not yet qualified.
+MASQUE, quiche/BoringSSL, WebTransport, and WASM are outside this client's scope.

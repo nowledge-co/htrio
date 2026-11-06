@@ -682,6 +682,58 @@ impl ClientBuilder {
         self.with_inner(|inner| inner.http3_max_field_section_size(value))
     }
 
+    /// Enable replay-gated HTTP/3 early data. Disabled by default.
+    ///
+    /// See [`crate::ClientBuilder::tls_early_data`] for credential, method,
+    /// body, resumption, and confirmed-retry policy.
+    #[cfg(feature = "http3")]
+    pub fn tls_early_data(self, enabled: bool) -> ClientBuilder {
+        self.with_inner(|inner| inner.tls_early_data(enabled))
+    }
+
+    /// Bound buffered encoded HTTP/3 headers and control frames (default: 1 MiB).
+    #[cfg(feature = "http3")]
+    pub fn http3_max_frame_size(self, bytes: u64) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_max_frame_size(bytes))
+    }
+
+    /// Bound dynamic QPACK tables and blocked streams (default: 4096 bytes and 16).
+    /// A zero capacity disables dynamic compression.
+    #[cfg(feature = "http3")]
+    pub fn http3_qpack(self, capacity: u64, blocked_streams: u64) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_qpack(capacity, blocked_streams))
+    }
+
+    /// Allow authenticated cross-origin reuse. Disabled by default.
+    ///
+    /// See [`crate::ClientBuilder::http3_coalescing`] for isolation requirements.
+    #[cfg(feature = "http3")]
+    pub fn http3_coalescing(self, enabled: bool) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_coalescing(enabled))
+    }
+
+    /// Supply the matching verifier for ECH/coalescing with preconfigured TLS.
+    #[cfg(feature = "http3")]
+    pub fn http3_certificate_verifier(
+        self,
+        verifier: Arc<dyn crate::http3::CertificateVerifier>,
+    ) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_certificate_verifier(verifier))
+    }
+
+    /// Supply native QUIC settings, including optional application-owned qlog.
+    /// Dedicated window and timeout setters override this base configuration.
+    #[cfg(feature = "http3")]
+    pub fn http3_transport_config(self, config: crate::http3::TransportConfig) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_transport_config(config))
+    }
+
+    /// Send QUIC keepalives at this interval, or disable them with `None`.
+    #[cfg(feature = "http3")]
+    pub fn http3_keep_alive_interval(self, interval: Option<Duration>) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_keep_alive_interval(interval))
+    }
+
     /// Enable whether to send HTTP/3 protocol grease on the connections.
     ///
     /// HTTP/3 uses the concept of "grease"
@@ -1391,6 +1443,34 @@ impl Client {
     pub fn execute(&self, request: Request) -> crate::Result<Response> {
         self.inner.execute_request(request)
     }
+
+    /// Establish a connection without dispatching an HTTP request.
+    /// Uses the worker runtime and this client's DNS, proxy, and TLS policy.
+    /// The blocking client's timeout bounds the wait and cancels preparation.
+    #[cfg(feature = "http3")]
+    pub fn preconnect<U: IntoUrl>(&self, url: U) -> crate::Result<()> {
+        self.inner.preconnect(url.into_url()?)
+    }
+
+    /// Invalidate future HTTP/3 routes and resolver caches after a network change.
+    /// Active streams and SOCKS associations retain their transport.
+    #[cfg(feature = "http3")]
+    pub fn network_changed(&self) {
+        self.inner.client.network_changed();
+    }
+
+    /// Snapshot the HTTP/3 pool without reading traffic contents.
+    #[cfg(feature = "http3")]
+    pub fn http3_pool_stats(&self) -> crate::http3::PoolStats {
+        self.inner.client.http3_pool_stats()
+    }
+
+    /// Rebind direct QUIC connections without moving SOCKS associations.
+    /// Socket registration uses the endpoint's worker runtime.
+    #[cfg(feature = "http3")]
+    pub fn http3_rebind(&self, socket: std::net::UdpSocket) -> crate::Result<()> {
+        self.inner.client.http3_rebind(socket)
+    }
 }
 
 impl fmt::Debug for Client {
@@ -1413,7 +1493,16 @@ impl fmt::Debug for ClientBuilder {
 struct ClientHandle {
     timeout: Timeout,
     inner: Arc<InnerClientHandle>,
+    #[cfg(feature = "http3")]
+    client: async_impl::Client,
+    #[cfg(feature = "http3")]
+    runtime: tokio::runtime::Handle,
 }
+
+#[cfg(feature = "http3")]
+type Startup = (async_impl::Client, tokio::runtime::Handle);
+#[cfg(not(feature = "http3"))]
+type Startup = ();
 
 type OneshotResponse = oneshot::Sender<crate::Result<async_impl::Response>>;
 type ThreadSender = mpsc::UnboundedSender<(async_impl::Request, OneshotResponse)>;
@@ -1444,7 +1533,7 @@ impl ClientHandle {
         let timeout = builder.timeout;
         let builder = builder.inner;
         let (tx, rx) = mpsc::unbounded_channel::<(async_impl::Request, OneshotResponse)>();
-        let (spawn_tx, spawn_rx) = oneshot::channel::<crate::Result<()>>();
+        let (spawn_tx, spawn_rx) = oneshot::channel::<crate::Result<Startup>>();
         let handle = thread::Builder::new()
             .name("htrio-internal-sync-runtime".into())
             .spawn(move || {
@@ -1473,7 +1562,11 @@ impl ClientHandle {
                         }
                         Ok(v) => v,
                     };
-                    if let Err(e) = spawn_tx.send(Ok(())) {
+                    #[cfg(feature = "http3")]
+                    let startup = (client.clone(), tokio::runtime::Handle::current());
+                    #[cfg(not(feature = "http3"))]
+                    let startup = ();
+                    if let Err(e) = spawn_tx.send(Ok(startup)) {
                         error!("Failed to communicate successful startup: {e:?}");
                         return;
                     }
@@ -1497,11 +1590,15 @@ impl ClientHandle {
             .map_err(crate::error::builder)?;
 
         // Wait for the runtime thread to start up...
-        match wait::timeout(spawn_rx, None) {
-            Ok(Ok(())) => (),
+        let startup = match wait::timeout(spawn_rx, None) {
+            Ok(Ok(startup)) => startup,
             Ok(Err(err)) => return Err(err),
             Err(_canceled) => event_loop_panicked(),
-        }
+        };
+        #[cfg(feature = "http3")]
+        let (client, runtime) = startup;
+        #[cfg(not(feature = "http3"))]
+        let () = startup;
 
         let inner_handle = Arc::new(InnerClientHandle {
             tx: Some(tx),
@@ -1511,7 +1608,26 @@ impl ClientHandle {
         Ok(ClientHandle {
             timeout,
             inner: inner_handle,
+            #[cfg(feature = "http3")]
+            client,
+            #[cfg(feature = "http3")]
+            runtime,
         })
+    }
+
+    #[cfg(feature = "http3")]
+    fn preconnect(&self, url: crate::Url) -> crate::Result<()> {
+        let client = self.client.clone();
+        let target = url.clone();
+        let (tx, rx) = oneshot::channel();
+        self.runtime
+            .spawn(forward(async move { client.preconnect(target).await }, tx));
+        let future = async { rx.await.unwrap_or_else(|_| event_loop_panicked()) };
+        match wait::timeout(future, self.timeout.0) {
+            Ok(()) => Ok(()),
+            Err(wait::Waited::TimedOut(error)) => Err(crate::error::request(error).with_url(url)),
+            Err(wait::Waited::Inner(error)) => Err(error.with_url(url)),
+        }
     }
 
     fn execute_request(&self, req: Request) -> crate::Result<Response> {
@@ -1552,9 +1668,9 @@ impl ClientHandle {
     }
 }
 
-async fn forward<F>(fut: F, mut tx: OneshotResponse)
+async fn forward<F, T>(fut: F, mut tx: oneshot::Sender<crate::Result<T>>)
 where
-    F: Future<Output = crate::Result<async_impl::Response>>,
+    F: Future<Output = crate::Result<T>>,
 {
     futures_util::pin_mut!(fut);
 

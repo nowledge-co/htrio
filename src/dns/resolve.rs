@@ -37,6 +37,10 @@ pub trait Resolve: Send + Sync {
     /// Otherwise, port `0` will be replaced by the conventional port for the given scheme (e.g. 80 for http).
     fn resolve(&self, name: Name) -> Resolving;
 
+    /// Invalidate resolver-owned cache state after a network change.
+    /// The default preserves address-only resolver compatibility.
+    fn clear_cache(&self) {}
+
     /// Resolve HTTPS/SVCB service metadata for an HTTPS origin.
     ///
     /// The default preserves existing address-only resolvers. Return resolved
@@ -89,6 +93,11 @@ impl DynResolver {
     #[cfg(feature = "socks")]
     pub(crate) fn gai() -> Self {
         Self::new(Arc::new(super::gai::GaiResolver::new()))
+    }
+
+    #[cfg(feature = "http3")]
+    pub(crate) fn clear_cache(&self) {
+        self.resolver.clear_cache();
     }
 
     #[cfg(feature = "http3")]
@@ -163,6 +172,10 @@ impl DnsResolverWithOverrides {
 }
 
 impl Resolve for DnsResolverWithOverrides {
+    fn clear_cache(&self) {
+        self.dns_resolver.clear_cache();
+    }
+
     fn resolve(&self, name: Name) -> Resolving {
         match self.overrides.get(name.as_str()) {
             Some(dest) => {

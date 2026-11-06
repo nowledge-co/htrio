@@ -1,7 +1,7 @@
 [package]
 publish = false
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.89"
 name = "htrio-h3"
 version = "0.0.8"
 authors = [
@@ -15,7 +15,6 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "An async HTTP/3 implementation."
-documentation = "https://docs.rs/h3"
 readme = "README.md"
 keywords = [
     "http3",
@@ -28,7 +27,7 @@ categories = [
     "web-programming::http-server",
 ]
 license = "MIT"
-repository = "https://github.com/hyperium/h3"
+repository = "https://github.com/nowledge-co/htrio"
 
 [features]
 i-implement-a-third-party-backend-and-opt-into-breaking-changes = []

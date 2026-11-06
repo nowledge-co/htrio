@@ -86,7 +86,9 @@ origin. Each redirect hop makes its own transport decision.
   connection establishment races QUIC. Only the winning transport receives the
   request. Available alternatives and resolved addresses are rotated/raced.
 - Route backoff is scoped to the client and proxy credentials and confirmed
-  after the same TCP route succeeds. `Client::network_changed()` resets network
+  after the same TCP route succeeds. A TCP winner starts a bounded, request-free
+  QUIC probe to qualify silent failures or warm a usable connection.
+  `Client::network_changed()` resets network
   state and future endpoints while active streams retain their transport.
 - After dispatch, ambiguous transport failures do not trigger TCP replay.
   Safe protocol NACKs follow the retry policy. A 421 invalidates the alternative;
@@ -115,10 +117,12 @@ HTTP/3 requires rustls with TLS 1.3 and never falls back to TCP. No custom
 `RUSTFLAGS` are needed. `.alt_svc(false)` disables discovery while retaining
 explicit HTTP/3 support.
 
-Discovery uses response headers and the optional `dns::Resolve::resolve_service`
-metadata method. Hickory DNS also queries HTTPS records, follows bounded alias
-chains, and recognizes ALPN, ports, address hints, mandatory keys, and ECH.
-HTTP/2 ALTSVC frames are not yet implemented. `AltSvcCache::snapshot()` and `restore()` allow trusted,
+Discovery uses response headers, authenticated HTTP/2 ALTSVC frames, and the
+optional `dns::Resolve::resolve_service` metadata method. ALTSVC frames are
+accepted only for the TLS connection's origin or its issued request streams;
+cross-origin advertisements are ignored. Hickory DNS also queries HTTPS records,
+follows bounded alias chains, and recognizes ALPN, ports, address hints,
+mandatory keys, and ECH. `AltSvcCache::snapshot()` and `restore()` allow trusted,
 application-controlled persistence; htrio never writes cache files itself.
 
 HTTP/3 preserves informational responses and trailers, checks message lengths,
@@ -126,9 +130,16 @@ and bounds encoded/control frames and decoded header sections. Dropping a
 request or response cancels pending upload source reads. `preconnect()` opens
 connections without an HTTP request; `http3_keep_alive_interval()` controls
 keepalive. `http3_rebind()` migrates direct QUIC endpoints only.
+Network changes call the resolver's optional `clear_cache()` hook. Applications
+can rebind before the first request and outside Tokio; socket registration uses
+the endpoint's runtime. Blocking clients expose the same HTTP/3 configuration,
+priority, preconnection, pool, and network maintenance APIs.
 
 Response extensions expose `http3::ConnectionInfo` with setup time, current RTT,
-loss/congestion/MTU statistics, and pool availability. `remote_addr()` reports
+loss/congestion/MTU statistics, connection reuse, and pool availability.
+`http3::TransportInfo` records per-hop time to headers, protocol, route selection,
+and confirmed recovery reasons, including TCP race/fallback. Pool snapshots
+include bounded route probes and confirmed failure backoff. `remote_addr()` reports
 direct peers; SOCKS virtual addresses stay private. `tls_info(true)` includes the
 peer certificate. `http3_transport_config()` accepts native QUIC settings,
 including application-owned qlog streams with the `http3-qlog` feature.
@@ -136,7 +147,7 @@ including application-owned qlog streams with the `http3-qlog` feature.
 Dynamic QPACK uses a 4096-byte table and at most 16 blocked streams by default.
 `http3_qpack()` changes these limits or disables dynamic compression. Tables,
 instruction queues, outstanding sections, and decoded field sizes are bounded.
-Authorization, Cookie, and explicitly sensitive fields use stateless sections.
+Authorization, Cookie, API keys, and explicitly sensitive fields use stateless sections.
 
 `RequestBuilder::priority()` sends RFC 9218 urgency and incremental hints and
 maps urgency to QUIC scheduling. The response's `http3::RequestPriority` extension

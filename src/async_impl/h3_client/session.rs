@@ -187,7 +187,7 @@ impl EarlyData {
 }
 
 #[derive(Debug)]
-pub(super) struct EarlyDataRejected;
+pub(crate) struct EarlyDataRejected;
 impl std::fmt::Display for EarlyDataRejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("HTTP/3 early data requires a confirmed retry")

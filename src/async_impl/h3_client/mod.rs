@@ -34,7 +34,22 @@ pub(crate) struct H3Client {
 struct RouteHealth {
     generation: u64,
     coalescing_rejected: std::collections::HashSet<pool::Key>,
+    probes: std::collections::HashSet<pool::Key>,
     failed: std::collections::HashMap<pool::Key, (u32, std::time::Instant)>,
+}
+
+pub(crate) struct RouteProbe {
+    health: std::sync::Arc<std::sync::Mutex<RouteHealth>>,
+    key: pool::Key,
+    generation: u64,
+}
+impl Drop for RouteProbe {
+    fn drop(&mut self) {
+        let mut health = self.health.lock().unwrap();
+        if health.generation == self.generation {
+            health.probes.remove(&self.key);
+        }
+    }
 }
 
 impl H3Client {
@@ -56,6 +71,15 @@ impl H3Client {
         allow_early: bool,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<PoolClient, BoxError> {
+        let alternative = if alternative.is_none() {
+            self.discover(origin, proxy)
+                .await
+                .into_iter()
+                .next()
+                .map(|alternative| alternative.authority)
+        } else {
+            alternative
+        };
         let mut key = pool::extract_domain(origin)?;
         if let Some(alternative) = alternative {
             key.2 = alternative;
@@ -96,12 +120,19 @@ impl H3Client {
             pool::Connecting::Acquired(lock) => lock,
         };
         let started = std::time::Instant::now();
+        let generation = self.health.lock().unwrap().generation;
         let direct = proxy.is_none();
         let destination = pool::domain_as_uri(key.clone());
         let (driver, tx, endpoint, connection, early) = self
             .connector
-            .connect(destination, key.2, proxy, allow_early, deadline)
+            .connect(destination, key.2.clone(), proxy, allow_early, deadline)
             .await?;
+        {
+            let mut health = self.health.lock().unwrap();
+            if health.generation == generation {
+                health.failed.remove(&key);
+            }
+        }
         Ok(self.pool.new_connection(
             lock,
             driver,
@@ -151,6 +182,7 @@ impl H3Client {
             health.generation = generation;
             health.failed.clear();
             health.coalescing_rejected.clear();
+            health.probes.clear();
             self.pool.clear();
             self.connector.network_changed();
             return true;
@@ -210,11 +242,55 @@ impl H3Client {
     }
 
     pub(crate) fn pool_stats(&self) -> crate::http3::PoolStats {
-        self.pool.stats()
+        let mut stats = self.pool.stats();
+        let health = self.health.lock().unwrap();
+        stats.probing = health.probes.len();
+        stats.broken_routes = health
+            .failed
+            .values()
+            .filter(|(_, until)| *until > std::time::Instant::now())
+            .count();
+        stats
     }
 
     pub(crate) fn rebind(&self, socket: std::net::UdpSocket) -> Result<(), BoxError> {
         self.connector.rebind(socket)
+    }
+
+    pub(crate) fn probe(
+        &self,
+        origin: &Uri,
+        alternative: Authority,
+        proxy: Option<&crate::proxy::Intercepted>,
+        generation: u64,
+    ) -> Option<RouteProbe> {
+        let mut key = pool::extract_domain(origin).ok()?;
+        key.2 = alternative;
+        key.3 = proxy.map(pool::ProxyKey::new);
+        let mut health = self.health.lock().unwrap();
+        if health.generation != generation
+            || health.probes.len() >= 64
+            || !health.probes.insert(key.clone())
+        {
+            return None;
+        }
+        Some(RouteProbe {
+            health: self.health.clone(),
+            key,
+            generation,
+        })
+    }
+
+    pub(crate) fn retire_connection(&self, connection: &PoolClient) {
+        self.pool.remove(&connection.key);
+    }
+
+    pub(crate) fn reject_connection(&self, connection: &PoolClient) {
+        let mut health = self.health.lock().unwrap();
+        if health.coalescing_rejected.len() < 256 {
+            health.coalescing_rejected.insert(connection.key.clone());
+        }
+        self.pool.remove(&connection.key);
     }
 
     pub(crate) fn reject(

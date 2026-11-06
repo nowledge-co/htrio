@@ -33,6 +33,9 @@ use sealed::{Conn, Unnameable};
 
 pub(crate) type HttpConnector = hyper_util::client::legacy::connect::HttpConnector<DynResolver>;
 
+#[cfg(feature = "http3")]
+mod h2_alt_svc;
+
 #[derive(Clone)]
 pub(crate) enum Connector {
     // base service, with or without an embedded timeout
@@ -44,6 +47,7 @@ pub(crate) enum Connector {
     Prepared {
         inner: Box<Connector>,
         ready: PreparedConnections,
+        observer: Option<Arc<crate::alt_svc::AltSvcCache>>,
     },
 }
 
@@ -57,7 +61,9 @@ impl Service<Uri> for Connector {
             Connector::Simple(service) => service.poll_ready(cx),
             Connector::WithLayers(service) => service.poll_ready(cx),
             #[cfg(feature = "http3")]
-            Connector::Prepared { inner, .. } => inner.poll_ready(cx),
+            // A warm socket needs no connector permit. The cold path reserves
+            // readiness on the exact cloned service it calls via oneshot.
+            Connector::Prepared { .. } => Poll::Ready(Ok(())),
         }
     }
 
@@ -66,11 +72,25 @@ impl Service<Uri> for Connector {
             Connector::Simple(service) => service.call(dst),
             Connector::WithLayers(service) => service.call(Unnameable(dst)),
             #[cfg(feature = "http3")]
-            Connector::Prepared { inner, ready } => {
-                if let Some(connection) = ready.take(&dst) {
-                    return Box::pin(std::future::ready(Ok(connection)));
-                }
-                inner.call(dst)
+            Connector::Prepared {
+                inner,
+                ready,
+                observer,
+            } => {
+                use tower::ServiceExt;
+                let prepared = ready.take(&dst);
+                let connector = inner.as_ref().clone();
+                let observer = observer.clone();
+                Box::pin(async move {
+                    let connection = match prepared {
+                        Some(connection) => connection,
+                        None => connector.oneshot(dst.clone()).await?,
+                    };
+                    Ok(match observer {
+                        Some(cache) => h2_alt_svc::observe(connection, dst, cache),
+                        None => connection,
+                    })
+                })
             }
         }
     }
@@ -139,7 +159,10 @@ impl TcpPreconnect {
 
 #[cfg(feature = "http3")]
 impl Connector {
-    pub(crate) fn with_preconnect(self) -> (Self, TcpPreconnect) {
+    pub(crate) fn with_preconnect(
+        self,
+        observer: Option<Arc<crate::alt_svc::AltSvcCache>>,
+    ) -> (Self, TcpPreconnect) {
         let ready = PreparedConnections::default();
         let prepare = TcpPreconnect {
             connector: self.clone(),
@@ -149,6 +172,7 @@ impl Connector {
             Self::Prepared {
                 inner: Box::new(self),
                 ready,
+                observer,
             },
             prepare,
         )

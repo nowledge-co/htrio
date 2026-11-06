@@ -24,6 +24,8 @@ pub struct ConnectionInfo {
     pub(crate) coalesced: bool,
     pub(crate) early: crate::async_impl::h3_client::session::EarlyData,
     pub(crate) early_data_used: bool,
+    pub(crate) dispatched: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) reused: bool,
 }
 
 impl ConnectionInfo {
@@ -35,9 +37,14 @@ impl ConnectionInfo {
     pub fn is_available(&self) -> bool {
         self.sender.is_available() && self.connection.close_reason().is_none()
     }
-    /// DNS, proxy negotiation, QUIC, and HTTP/3 setup duration.
+    /// DNS, proxy negotiation, and setup time until the route became usable.
+    /// With opted-in early data, transport keys can precede TLS confirmation.
     pub fn connect_time(&self) -> Duration {
         self.connect_time
+    }
+    /// Whether the connection had already dispatched another request.
+    pub fn is_reused(&self) -> bool {
+        self.reused
     }
     /// Whether this route reuses a connection authenticated for another origin.
     pub fn is_coalesced(&self) -> bool {
@@ -93,6 +100,10 @@ pub struct PoolStats {
     pub available: usize,
     /// Connections retained by the pool but no longer eligible for reuse.
     pub retiring: usize,
+    /// Bounded request-free route probes after a TCP race succeeds.
+    pub probing: usize,
+    /// Routes currently in confirmed failure backoff.
+    pub broken_routes: usize,
 }
 
 /// Request urgency and incremental response preference (RFC 9218).
@@ -144,4 +155,45 @@ pub struct SessionStats {
     pub early_attempts: usize,
     /// Early connections rejected by the peer or terminated during establishment.
     pub early_rejections: usize,
+}
+
+/// Transport choice and timing for a single request hop, in response extensions.
+#[derive(Clone, Copy, Debug)]
+pub struct TransportInfo {
+    /// Negotiated protocol for this response.
+    pub protocol: http::Version,
+    /// Time from transport selection until final response headers.
+    pub time_to_headers: Duration,
+    /// Why this transport handled the request.
+    pub selection: TransportSelection,
+    /// A safe retry performed within this hop, if any.
+    pub recovery: Option<RecoveryReason>,
+}
+
+/// Content-free transport selection reasons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportSelection {
+    /// The ordinary TCP origin route, without an alternative attempt.
+    Origin,
+    /// An explicitly selected HTTP/3 route.
+    ExplicitHttp3,
+    /// An authenticated Alt-Svc header or ALTSVC frame.
+    AltSvc,
+    /// HTTPS/SVCB service metadata.
+    HttpsRecord,
+    /// TCP preparation won a race against an in-progress QUIC attempt.
+    TcpRace,
+    /// Alternative preparation failed before dispatch and TCP succeeded.
+    ConnectionFallback,
+    /// A cloneable request used the origin route after HTTP 421.
+    MisdirectedFallback,
+}
+
+/// Proof used to authorize a bounded retry before exposing a response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryReason {
+    /// A retiring connection did not dispatch any request bytes.
+    ConnectionRetired,
+    /// An eligible early request was rejected or received HTTP 425.
+    EarlyDataRejected,
 }

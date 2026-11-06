@@ -17,7 +17,7 @@ and Sean McArthur's copyright are included unchanged.
   the spelling used by Mem's reqwest 0.12 client.
 - Unify TCP and QUIC dispatch below retry, cookie, redirect, and decompression
   middleware, so each redirect hop selects a transport for its own origin.
-- Add bounded RFC 7838 header discovery, cache controls, freshness calculation,
+- Add bounded RFC 7838 header/HTTP/2 frame discovery, cache controls, freshness calculation,
   network-change invalidation, broken-endpoint backoff, `Alt-Used`, and 421
   invalidation/replay handling.
 - Separate the origin's TLS server name from the alternative network authority;
@@ -29,6 +29,13 @@ and Sean McArthur's copyright are included unchanged.
   configuration, and proxy-scoped connection pools.
 - Classify retries using typed protocol errors: HTTP/3 REQUEST_REJECTED and
   HTTP/2 safe NACKs can be retried; ambiguous network timeouts cannot.
+- Race TCP/QUIC preparation without consuming bodies; qualify failed routes with
+  bounded, request-free probes only after TCP succeeds. Discover HTTPS records
+  with the client's resolver and retain origin authentication when applying ECH.
+- Add replay-gated 0-RTT, bounded dynamic QPACK, RFC 9218 priority, opt-in
+  authenticated origin coalescing, connection diagnostics, and qlog hooks.
+- Expose the same native HTTP/3 configuration and network maintenance in async
+  and blocking clients; register rebound sockets with their owning runtime.
 
 ## Maintenance
 
@@ -55,3 +62,6 @@ cancellation-safe chunk polling method for the HTTP/3 adapter.
 The adapter's optional native DATAGRAM feature uses sibling `htrio-h3-datagram`,
 derived from h3-datagram 0.0.2, to share the same protocol types. The client does
 not enable this extension.
+
+All maintained workspace crates require Rust 1.89. Their inherited versions
+identify the upstream source baseline, rather than promising the upstream MSRV.

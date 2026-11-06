@@ -50,6 +50,7 @@ mod http3 {
     use super::super::h3_client::{H3Client, PoolClient};
     use crate::alt_svc::AltSvcCache;
     use crate::error::{self, BoxError};
+    use crate::http3::{RecoveryReason, TransportInfo, TransportSelection};
     use crate::proxy::Matcher;
     use crate::Body;
 
@@ -67,7 +68,7 @@ mod http3 {
 
     enum Prepared {
         Http3(PoolClient, crate::alt_svc::Alternative),
-        Tcp(crate::connect::sealed::Conn),
+        Tcp(crate::connect::sealed::Conn, TransportSelection),
     }
 
     impl Http3Transport {
@@ -86,7 +87,54 @@ mod http3 {
                 .map_err(error::request)
         }
 
+        async fn candidates(
+            &self,
+            origin: &Uri,
+            proxy: Option<&crate::proxy::Intercepted>,
+        ) -> crate::Result<(Vec<crate::alt_svc::Alternative>, bool)> {
+            let mut alternatives = self
+                .cache
+                .candidates(origin)
+                .into_iter()
+                .filter(|alternative| {
+                    !self
+                        .client
+                        .as_ref()
+                        .unwrap()
+                        .is_broken(origin, &alternative.authority, proxy)
+                })
+                .collect::<Vec<_>>();
+            let services = self.client.as_ref().unwrap().discover(origin, proxy).await;
+            let requires_ech = services.iter().any(|service| service.requires_ech);
+            if requires_ech {
+                alternatives.clear();
+            }
+            for service in services {
+                if (!requires_ech || service.requires_ech)
+                    && !alternatives
+                        .iter()
+                        .any(|alternative| alternative.authority == service.authority)
+                    && !self
+                        .client
+                        .as_ref()
+                        .unwrap()
+                        .is_broken(origin, &service.authority, proxy)
+                {
+                    alternatives.push(service);
+                }
+            }
+            if requires_ech && alternatives.is_empty() {
+                return Err(error::request("all ECH service routes are unavailable"));
+            }
+            Ok((alternatives, requires_ech))
+        }
+
         pub(crate) async fn preconnect(&mut self, origin: Uri) -> crate::Result<()> {
+            if let Some(client) = self.client.as_mut() {
+                if client.network_generation(self.cache.generation()) {
+                    self.tcp_preconnect.ready.clear();
+                }
+            }
             let proxy = self
                 .proxies
                 .iter()
@@ -94,24 +142,23 @@ mod http3 {
             if self.prior_knowledge {
                 self.prepare_with_early(&origin, None, proxy.as_ref(), false, false)
                     .await?;
-            } else if self.discover && origin.scheme_str() == Some("https") {
-                let alternatives = self
-                    .cache
-                    .candidates(&origin)
-                    .into_iter()
-                    .filter(|alternative| {
-                        self.client.as_ref().is_some_and(|client| {
-                            !client.is_broken(&origin, &alternative.authority, proxy.as_ref())
-                        })
-                    })
-                    .collect::<Vec<_>>();
+            } else if self.discover
+                && self.client.is_some()
+                && origin.scheme_str() == Some("https")
+                && proxy.as_ref().is_none_or(|proxy| {
+                    cfg!(feature = "socks")
+                        && matches!(proxy.uri().scheme_str(), Some("socks5" | "socks5h"))
+                })
+            {
+                let (alternatives, requires_ech) = self.candidates(&origin, proxy.as_ref()).await?;
                 let mut failed = Vec::new();
-                if self
+                match self
                     .prepare_candidates(&origin, alternatives, proxy.as_ref(), &mut failed, false)
                     .await
-                    .is_ok()
                 {
-                    return Ok(());
+                    Ok(_) => return Ok(()),
+                    Err(error) if requires_ech => return Err(error::request(error)),
+                    Err(_) => {}
                 }
                 let connection = self
                     .tcp_preconnect
@@ -137,6 +184,7 @@ mod http3 {
         ) -> crate::Result<Response<ResponseBody>> {
             let origin = request.uri().clone();
             let started = Instant::now();
+            let mut tcp_selection = TransportSelection::Origin;
             let proxy = self
                 .proxies
                 .iter()
@@ -175,48 +223,14 @@ mod http3 {
                 && request.version() == Version::HTTP_11
                 && !forced
             {
-                let mut alternatives = self
-                    .cache
-                    .candidates(&origin)
-                    .into_iter()
-                    .filter(|alternative| {
-                        !self.client.as_ref().unwrap().is_broken(
-                            &origin,
-                            &alternative.authority,
-                            proxy.as_ref(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let services = self
-                    .client
-                    .as_ref()
-                    .unwrap()
-                    .discover(&origin, proxy.as_ref())
-                    .await;
-                let requires_ech = services.iter().any(|service| service.requires_ech);
-                if requires_ech {
-                    alternatives.clear();
-                }
-                for service in services {
-                    if (!requires_ech || service.requires_ech)
-                        && !alternatives
-                            .iter()
-                            .any(|alternative| alternative.authority == service.authority)
-                        && !self.client.as_ref().unwrap().is_broken(
-                            &origin,
-                            &service.authority,
-                            proxy.as_ref(),
-                        )
-                    {
-                        alternatives.push(service);
-                    }
-                }
-                if requires_ech && alternatives.is_empty() {
-                    return Err(error::request("all ECH service routes are unavailable"));
-                }
+                let (alternatives, requires_ech) = self.candidates(&origin, proxy.as_ref()).await?;
                 if !alternatives.is_empty() {
                     let mut failed = Vec::new();
                     let tcp_prepare = self.tcp_preconnect.clone();
+                    let probe_candidates = alternatives
+                        .iter()
+                        .map(|alternative| alternative.authority.clone())
+                        .collect::<Vec<_>>();
                     let prepared = {
                         let h3 = self.prepare_candidates(
                             &origin,
@@ -237,10 +251,10 @@ mod http3 {
                             tokio::select! {
                                 result = &mut h3 => match result {
                                     Ok((connection, alternative)) => Prepared::Http3(connection, alternative),
-                                    Err(_) => Prepared::Tcp(tcp_connect.await.map_err(error::request)?),
+                                    Err(_) => Prepared::Tcp(tcp_connect.await.map_err(error::request)?, TransportSelection::ConnectionFallback),
                                 },
                                 result = &mut tcp_connect => match result {
-                                    Ok(connection) => Prepared::Tcp(connection),
+                                    Ok(connection) => Prepared::Tcp(connection, TransportSelection::TcpRace),
                                     Err(tcp_error) => match h3.await {
                                         Ok((connection, alternative)) => Prepared::Http3(connection, alternative),
                                         Err(_) => return Err(error::request(tcp_error)),
@@ -278,9 +292,19 @@ mod http3 {
                                 )
                                 .await
                             {
-                                Ok(response)
+                                Ok(mut response)
                                     if response.status() == StatusCode::MISDIRECTED_REQUEST =>
                                 {
+                                    self.annotate(
+                                        &mut response,
+                                        started,
+                                        if alternative.from_dns {
+                                            TransportSelection::HttpsRecord
+                                        } else {
+                                            TransportSelection::AltSvc
+                                        },
+                                    );
+                                    tcp_selection = TransportSelection::MisdirectedFallback;
                                     self.cache.remove(&origin, &alternative);
                                     self.client.as_ref().unwrap().reject(
                                         &origin,
@@ -293,20 +317,40 @@ mod http3 {
                                         return Ok(response);
                                     }
                                 }
-                                Ok(response) => {
+                                Ok(mut response) => {
+                                    self.annotate(
+                                        &mut response,
+                                        started,
+                                        if alternative.from_dns {
+                                            TransportSelection::HttpsRecord
+                                        } else {
+                                            TransportSelection::AltSvc
+                                        },
+                                    );
                                     self.observe(&origin, &response, started);
                                     return Ok(response);
                                 }
                                 Err(error) => return Err(error::request(error)),
                             }
                         }
-                        Prepared::Tcp(connection) => {
+                        Prepared::Tcp(connection, selection) => {
                             self.tcp_preconnect.ready.insert(&origin, connection);
-                            let response = tcp
+                            let mut response = tcp
                                 .request(request)
                                 .await
                                 .map_err(error::request)?
                                 .map(boxed);
+                            self.annotate(&mut response, started, selection);
+                            if selection == TransportSelection::TcpRace {
+                                if let Some(alternative) = probe_candidates.get(failed.len()) {
+                                    self.probe_after_tcp(
+                                        &origin,
+                                        alternative.clone(),
+                                        proxy.as_ref(),
+                                        generation,
+                                    );
+                                }
+                            }
                             if generation == self.cache.generation() {
                                 for alternative in failed {
                                     self.client.as_ref().unwrap().confirm_broken(
@@ -328,19 +372,21 @@ mod http3 {
                     .prepare_with_early(&origin, None, proxy.as_ref(), false, allow_early)
                     .await?;
                 *request.version_mut() = Version::HTTP_3;
-                let response = self
+                let mut response = self
                     .dispatch(connection, request, &origin, None, proxy.as_ref(), false)
                     .await
                     .map_err(error::request)?;
+                self.annotate(&mut response, started, TransportSelection::ExplicitHttp3);
                 self.observe(&origin, &response, started);
                 return Ok(response);
             }
 
-            let response = tcp
+            let mut response = tcp
                 .request(request)
                 .await
                 .map_err(error::request)?
                 .map(boxed);
+            self.annotate(&mut response, started, tcp_selection);
             self.observe(&origin, &response, started);
             Ok(response)
         }
@@ -385,18 +431,31 @@ mod http3 {
             automatic: bool,
         ) -> Result<Response<ResponseBody>, BoxError> {
             let mut pending = Some(request);
+            let mut recovery = None;
             for attempt in 0..2 {
-                let result = connection.send_request(&mut pending).await;
+                let mut result = connection.send_request(&mut pending).await;
+                if let (Some(reason), Ok(response)) = (recovery, result.as_mut()) {
+                    response.extensions_mut().insert(reason);
+                }
+                if result
+                    .as_ref()
+                    .is_ok_and(|response| response.status() == StatusCode::MISDIRECTED_REQUEST)
+                {
+                    self.client.as_ref().unwrap().reject_connection(&connection);
+                }
                 if result.is_ok() || pending.is_none() || attempt == 1 {
                     return result;
                 }
-                self.client.as_ref().unwrap().remove(
-                    origin,
-                    alternative
-                        .clone()
-                        .unwrap_or_else(|| origin.authority().unwrap().clone()),
-                    proxy,
+                recovery = Some(
+                    if result.as_ref().err().is_some_and(|error| {
+                        error.is::<super::super::h3_client::session::EarlyDataRejected>()
+                    }) {
+                        RecoveryReason::EarlyDataRejected
+                    } else {
+                        RecoveryReason::ConnectionRetired
+                    },
                 );
+                self.client.as_ref().unwrap().retire_connection(&connection);
                 connection = self
                     .prepare_with_early(origin, alternative.clone(), proxy, automatic, false)
                     .await
@@ -436,6 +495,56 @@ mod http3 {
                 None => connect.await,
             };
             result.map_err(|error: BoxError| error::request(error))
+        }
+
+        fn probe_after_tcp(
+            &self,
+            origin: &Uri,
+            alternative: http::uri::Authority,
+            proxy: Option<&crate::proxy::Intercepted>,
+            generation: u64,
+        ) {
+            let Some(client) = self.client.as_ref() else {
+                return;
+            };
+            let Some(guard) = client.probe(origin, alternative.clone(), proxy, generation) else {
+                return;
+            };
+            let mut transport = self.clone();
+            let origin = origin.clone();
+            let proxy = proxy.cloned();
+            tokio::spawn(async move {
+                let _guard = guard;
+                let result = transport
+                    .prepare_with_early(
+                        &origin,
+                        Some(alternative.clone()),
+                        proxy.as_ref(),
+                        true,
+                        false,
+                    )
+                    .await;
+                if result.is_err() && transport.cache.generation() == generation {
+                    if let Some(client) = transport.client.as_ref() {
+                        client.confirm_broken(&origin, alternative, proxy.as_ref());
+                    }
+                }
+            });
+        }
+
+        fn annotate(
+            &self,
+            response: &mut Response<ResponseBody>,
+            started: Instant,
+            selection: TransportSelection,
+        ) {
+            let info = TransportInfo {
+                protocol: response.version(),
+                time_to_headers: started.elapsed(),
+                selection,
+                recovery: response.extensions().get::<RecoveryReason>().copied(),
+            };
+            response.extensions_mut().insert(info);
         }
 
         fn observe(&self, origin: &Uri, response: &Response<ResponseBody>, started: Instant) {

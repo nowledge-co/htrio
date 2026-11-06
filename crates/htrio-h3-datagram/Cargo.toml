@@ -1,6 +1,7 @@
 [package]
 publish = false
 edition = "2021"
+rust-version = "1.89"
 name = "htrio-h3-datagram"
 version = "0.0.2"
 build = false
@@ -10,7 +11,6 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "rfc9297 extension for the h3 crate"
-documentation = "https://docs.rs/h3-datagram"
 readme = "readme.md"
 keywords = [
     "http3",
@@ -22,7 +22,7 @@ categories = [
     "web-programming",
 ]
 license = "MIT"
-repository = "https://github.com/hyperium/h3"
+repository = "https://github.com/nowledge-co/htrio"
 
 [features]
 tracing = ["dep:tracing"]
