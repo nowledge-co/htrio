@@ -709,3 +709,70 @@ async fn tcp_connection_races_a_blackholed_quic_handshake() {
     assert_eq!(response.text().await.unwrap(), "one dispatch");
     assert_eq!(server.requests().len(), 2);
 }
+
+#[tokio::test]
+async fn cross_origin_coalescing_is_opt_in_and_rechecks_certificate_authority() {
+    for enabled in [false, true] {
+        let server = LocalServer::with_names(&["origin.test", "second.test"], advertise).await;
+        let cache = Arc::new(AltSvcCache::new());
+        let client = server
+            .client_builder()
+            .resolve("second.test", server.addr)
+            .resolve("uncovered.test", server.addr)
+            .http3_coalescing(enabled)
+            .alt_svc_cache(cache.clone())
+            .build()
+            .unwrap();
+        let second = format!("https://second.test:{}/", server.addr.port());
+        for url in [server.url("/seed"), format!("{second}seed")] {
+            client.get(url).send().await.unwrap().bytes().await.unwrap();
+        }
+        let response = client.get(server.url("/first")).send().await.unwrap();
+        let first = response
+            .extensions()
+            .get::<htrio::http3::ConnectionInfo>()
+            .unwrap()
+            .id();
+        response.bytes().await.unwrap();
+        let response = client.get(format!("{second}second")).send().await.unwrap();
+        let info = response
+            .extensions()
+            .get::<htrio::http3::ConnectionInfo>()
+            .unwrap();
+        assert_eq!(info.is_coalesced(), enabled);
+        assert_eq!(info.id() == first, enabled);
+        response.bytes().await.unwrap();
+        cache.restore([htrio::alt_svc::Record {
+            origin: format!("https://uncovered.test:{}", server.addr.port()),
+            authority: format!("alternative.test:{}", server.quic_addr.port()),
+            expires_at: std::time::SystemTime::now() + Duration::from_secs(60),
+            persist: false,
+        }]);
+        assert!(client
+            .get(format!(
+                "https://uncovered.test:{}/must-not-dispatch",
+                server.addr.port()
+            ))
+            .send()
+            .await
+            .is_err());
+        assert!(server
+            .requests()
+            .iter()
+            .all(|request| request.uri().host() != Some("uncovered.test")));
+        let response = client
+            .get(server.url("/still-healthy"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .extensions()
+                .get::<htrio::http3::ConnectionInfo>()
+                .unwrap()
+                .id(),
+            first
+        );
+        response.bytes().await.unwrap();
+    }
+}

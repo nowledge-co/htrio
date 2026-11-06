@@ -21,6 +21,7 @@ pub struct ConnectionInfo {
     pub(crate) direct: bool,
     pub(crate) connect_time: Duration,
     pub(crate) tls_info: bool,
+    pub(crate) coalesced: bool,
 }
 
 impl ConnectionInfo {
@@ -35,6 +36,10 @@ impl ConnectionInfo {
     /// DNS, proxy negotiation, QUIC, and HTTP/3 setup duration.
     pub fn connect_time(&self) -> Duration {
         self.connect_time
+    }
+    /// Whether this route reuses a connection authenticated for another origin.
+    pub fn is_coalesced(&self) -> bool {
+        self.coalesced
     }
     /// Current round-trip-time estimate.
     pub fn rtt(&self) -> Duration {
@@ -97,3 +102,6 @@ impl RequestPriority {
         self.handle.update(priority)
     }
 }
+
+/// Certificate verification policy used when rebuilding preconfigured TLS for ECH.
+pub use rustls::client::danger::ServerCertVerifier as CertificateVerifier;

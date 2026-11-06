@@ -278,7 +278,7 @@ mod http3 {
                                     if response.status() == StatusCode::MISDIRECTED_REQUEST =>
                                 {
                                     self.cache.remove(&origin, &alternative);
-                                    self.client.as_ref().unwrap().remove(
+                                    self.client.as_ref().unwrap().reject(
                                         &origin,
                                         alternative.authority,
                                         proxy.as_ref(),
@@ -303,12 +303,14 @@ mod http3 {
                                 .await
                                 .map_err(error::request)?
                                 .map(boxed);
-                            for alternative in failed {
-                                self.client.as_ref().unwrap().confirm_broken(
-                                    &origin,
-                                    alternative,
-                                    proxy.as_ref(),
-                                );
+                            if generation == self.cache.generation() {
+                                for alternative in failed {
+                                    self.client.as_ref().unwrap().confirm_broken(
+                                        &origin,
+                                        alternative,
+                                        proxy.as_ref(),
+                                    );
+                                }
                             }
                             self.observe(&origin, &response, started);
                             return Ok(response);

@@ -144,8 +144,14 @@ can enqueue bounded, coalesced PRIORITY_UPDATE messages.
 
 DNS ECH configurations are applied to origin-authenticated QUIC handshakes.
 ECH-selected routes fail closed instead of racing a TCP connection with clear
-SNI. Preconfigured rustls backends currently need an equivalent verifier before
-ECH configurations can be rebuilt; normal htrio TLS configurations retain it.
+SNI. Preconfigured rustls backends use `http3_certificate_verifier()` to supply their
+matching verification policy for ECH rebuilding; normal TLS configurations
+retain it automatically.
+
+`http3_coalescing(true)` permits cross-origin reuse only within the same client,
+proxy credentials, network generation, and alternative endpoint. The certificate
+is verified again for the new origin. Client-certificate and ECH routes remain
+isolated. A 421 disables coalescing for the rejected route.
 
 ## SOCKS5 UDP and DNS
 

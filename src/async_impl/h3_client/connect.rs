@@ -43,6 +43,7 @@ pub(crate) struct H3ClientConfig {
     /// Send reserved protocol values to exercise peers' extension handling.
     pub(crate) send_grease: Option<bool>,
     pub(crate) qpack: (u64, u64),
+    pub(crate) coalescing: bool,
 }
 
 impl Default for H3ClientConfig {
@@ -54,6 +55,7 @@ impl Default for H3ClientConfig {
             verifier: None,
             send_grease: None,
             qpack: (4096, 16),
+            coalescing: false,
         }
     }
 }
@@ -182,6 +184,56 @@ impl H3Connector {
                     && endpoint.port == alternative.port_u16().unwrap_or(443)
             })
             .cloned()
+    }
+
+    pub(crate) fn can_coalesce(
+        &self,
+        origin: &Uri,
+        previous: &Uri,
+        destination: &http::uri::Authority,
+        connection: &quinn::Connection,
+    ) -> bool {
+        if !self.client_config.coalescing
+            || self.tls.client_auth_cert_resolver.has_certs()
+            || self
+                .service(origin, destination)
+                .is_some_and(|service| service.ech_config_list.is_some())
+            || self
+                .service(previous, destination)
+                .is_some_and(|service| service.ech_config_list.is_some())
+        {
+            return false;
+        }
+        let Some(verifier) = self.client_config.verifier.as_ref() else {
+            return false;
+        };
+        let Some(host) = origin.host() else {
+            return false;
+        };
+        let Ok(name) =
+            rustls::pki_types::ServerName::try_from(host.trim_matches(['[', ']']).to_owned())
+        else {
+            return false;
+        };
+        let Some(identity) = connection.peer_identity() else {
+            return false;
+        };
+        let Ok(chain) = identity.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+        else {
+            return false;
+        };
+        let Some(leaf) = chain.first() else {
+            return false;
+        };
+        verifier
+            .verify_server_cert(
+                leaf,
+                &chain[1..],
+                &name,
+                &[],
+                rustls::pki_types::UnixTime::now(),
+            )
+            .is_ok()
     }
 
     fn route_config(

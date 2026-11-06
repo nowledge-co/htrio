@@ -67,6 +67,7 @@ pub struct Pool {
 struct ConnectingLockInner {
     key: Key,
     pool: Arc<Mutex<PoolInner>>,
+    generation: u64,
 }
 
 /// A lock that ensures only one HTTP/3 connection is established per route at a
@@ -90,23 +91,35 @@ pub enum Connecting {
 }
 
 impl ConnectingLock {
-    fn new(key: Key, pool: Arc<Mutex<PoolInner>>) -> Self {
-        Self(Some(ConnectingLockInner { key, pool }))
+    fn new(key: Key, pool: Arc<Mutex<PoolInner>>, generation: u64) -> Self {
+        Self(Some(ConnectingLockInner {
+            key,
+            pool,
+            generation,
+        }))
     }
 
     /// Forget the lock and return corresponding Key
-    fn forget(mut self) -> Key {
+    fn forget(mut self) -> (Key, u64) {
         // Unwrap is safe because the Option can be None only after dropping the
         // lock
-        self.0.take().unwrap().key
+        let lock = self.0.take().unwrap();
+        (lock.key, lock.generation)
     }
 }
 
 impl Drop for ConnectingLock {
     fn drop(&mut self) {
-        if let Some(ConnectingLockInner { key, pool }) = self.0.take() {
+        if let Some(ConnectingLockInner {
+            key,
+            pool,
+            generation,
+        }) = self.0.take()
+        {
             let mut pool = pool.lock().unwrap();
-            pool.connecting.remove(&key);
+            if pool.generation == generation {
+                pool.connecting.remove(&key);
+            }
             trace!("HTTP/3 connecting lock for {:?} is dropped", key);
         }
     }
@@ -126,6 +139,7 @@ impl Pool {
     pub fn new(timeout: Option<Duration>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(PoolInner {
+                generation: 0,
                 connecting: HashMap::new(),
                 idle_conns: HashMap::new(),
                 timeout,
@@ -144,7 +158,11 @@ impl Pool {
         } else {
             let (tx, _) = watch::channel(None);
             inner.connecting.insert(key.clone(), tx);
-            Connecting::Acquired(ConnectingLock::new(key.clone(), Arc::clone(&self.inner)))
+            Connecting::Acquired(ConnectingLock::new(
+                key.clone(),
+                Arc::clone(&self.inner),
+                inner.generation,
+            ))
         }
     }
 
@@ -175,6 +193,38 @@ impl Pool {
             .and_then(|conn| Some(conn.pool()))
     }
 
+    pub fn coalescing_candidates(&self, key: &Key) -> Vec<(Key, PoolClient)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .idle_conns
+            .iter()
+            .filter(|(candidate, connection)| {
+                candidate.0 == key.0
+                    && candidate.1 != key.1
+                    && candidate.2 == key.2
+                    && candidate.3 == key.3
+                    && !connection.is_invalid()
+                    && inner
+                        .timeout
+                        .is_none_or(|timeout| connection.idle_timeout.elapsed() <= timeout)
+            })
+            .map(|(key, connection)| (key.clone(), connection.client.clone()))
+            .collect()
+    }
+
+    pub fn alias(&self, key: Key, existing: &Key) -> Option<PoolClient> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut connection = inner.idle_conns.get(existing)?.clone();
+        if connection.is_invalid() {
+            return None;
+        }
+        connection.idle_timeout = Instant::now();
+        connection.client.info.coalesced = true;
+        let client = connection.client.clone();
+        inner.insert(key, connection);
+        Some(client)
+    }
+
     pub fn stats(&self) -> crate::http3::PoolStats {
         let inner = self.inner.lock().unwrap();
         let available = inner
@@ -190,7 +240,10 @@ impl Pool {
     }
 
     pub fn clear(&self) {
-        self.inner.lock().unwrap().idle_conns.clear();
+        let mut inner = self.inner.lock().unwrap();
+        inner.generation = inner.generation.wrapping_add(1);
+        inner.idle_conns.clear();
+        inner.connecting.clear();
     }
 
     pub fn remove(&self, key: &Key) {
@@ -219,12 +272,14 @@ impl Pool {
         let mut inner = self.inner.lock().unwrap();
 
         // We clean up "connecting" here so we don't have to acquire the lock again.
-        let key = lock.forget();
+        let (key, generation) = lock.forget();
+        let client = PoolClient::new(tx, connection, direct, connect_time, tls_info);
+        if generation != inner.generation {
+            return client;
+        }
         let Some(notifier) = inner.connecting.remove(&key) else {
             unreachable!("there should be one connecting lock at a time");
         };
-        let client = PoolClient::new(tx, connection, direct, connect_time, tls_info);
-
         // Send the client to all our awaiters
         let pool_client = if let Err(watch::error::SendError(Some(unsent_client))) =
             notifier.send(Some(client.clone()))
@@ -244,6 +299,7 @@ impl Pool {
 }
 
 struct PoolInner {
+    generation: u64,
     connecting: HashMap<Key, watch::Sender<Option<PoolClient>>>,
     idle_conns: HashMap<Key, PoolConnection>,
     timeout: Option<Duration>,
@@ -282,7 +338,7 @@ impl PoolInner {
 #[derive(Clone)]
 pub struct PoolClient {
     inner: SendRequest<OpenStreams, Bytes>,
-    info: crate::http3::ConnectionInfo,
+    pub(super) info: crate::http3::ConnectionInfo,
 }
 
 impl PoolClient {
@@ -299,6 +355,7 @@ impl PoolClient {
             direct,
             connect_time,
             tls_info,
+            coalesced: false,
         };
         Self { inner: tx, info }
     }
@@ -530,9 +587,10 @@ fn validate_trailers(headers: &http::HeaderMap) -> Result<(), BoxError> {
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct PoolConnection {
     // This receives errors from polling h3 driver.
-    close_rx: Receiver<h3::error::ConnectionError>,
+    close_rx: Arc<Mutex<Receiver<h3::error::ConnectionError>>>,
     client: PoolClient,
     idle_timeout: Instant,
 }
@@ -540,7 +598,7 @@ pub struct PoolConnection {
 impl PoolConnection {
     pub fn new(client: PoolClient, close_rx: Receiver<h3::error::ConnectionError>) -> Self {
         Self {
-            close_rx,
+            close_rx: Arc::new(Mutex::new(close_rx)),
             client,
             idle_timeout: Instant::now(),
         }
@@ -555,7 +613,7 @@ impl PoolConnection {
         if !self.client.inner.is_available() {
             return true;
         }
-        match self.close_rx.try_recv() {
+        match self.close_rx.lock().unwrap().try_recv() {
             Err(TryRecvError::Empty) => false,
             Err(TryRecvError::Disconnected) => true,
             Ok(_) => true,
@@ -710,4 +768,25 @@ fn is_stop_sending(e: &h3::error::StreamError) -> bool {
             ..
         }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn an_old_connecting_lock_cannot_release_a_new_network_attempt() {
+        let pool = Pool::new(None);
+        let key = extract_domain(&"https://origin.test/".parse().unwrap()).unwrap();
+        let Connecting::Acquired(old) = pool.connecting(&key) else {
+            panic!("first attempt must own the lock");
+        };
+        pool.clear();
+        let Connecting::Acquired(current) = pool.connecting(&key) else {
+            panic!("network change must release old waiters");
+        };
+        drop(old);
+        assert!(matches!(pool.connecting(&key), Connecting::InProgress(_)));
+        drop(current);
+        assert!(matches!(pool.connecting(&key), Connecting::Acquired(_)));
+    }
 }

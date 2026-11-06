@@ -286,6 +286,10 @@ struct Config {
     #[cfg(feature = "http3")]
     h3_qpack: (u64, u64),
     #[cfg(feature = "http3")]
+    h3_coalescing: bool,
+    #[cfg(feature = "http3")]
+    h3_preconfigured_verifier: Option<Arc<dyn rustls::client::danger::ServerCertVerifier>>,
+    #[cfg(feature = "http3")]
     alt_svc: bool,
     #[cfg(feature = "http3")]
     alt_svc_cache: Arc<crate::alt_svc::AltSvcCache>,
@@ -425,6 +429,10 @@ impl ClientBuilder {
                 #[cfg(feature = "http3")]
                 h3_qpack: (4096, 16),
                 #[cfg(feature = "http3")]
+                h3_coalescing: false,
+                #[cfg(feature = "http3")]
+                h3_preconfigured_verifier: None,
+                #[cfg(feature = "http3")]
                 alt_svc: true,
                 #[cfg(feature = "http3")]
                 alt_svc_cache: Arc::new(crate::alt_svc::AltSvcCache::new()),
@@ -539,6 +547,7 @@ impl ClientBuilder {
                  h3_max_frame_size,
                  h3_send_grease,
                  h3_qpack,
+                 coalescing,
                  local_address,
                  http_version_pref: &HttpVersionPref| {
                     let mut transport_config = quic_transport_config.unwrap_or_default();
@@ -570,6 +579,7 @@ impl ClientBuilder {
                     h3_client_config.tls_info = tls_info;
                     h3_client_config.verifier = verifier;
                     h3_client_config.qpack = h3_qpack;
+                    h3_client_config.coalescing = coalescing;
 
                     if let Some(max_field_section_size) = h3_max_field_section_size {
                         h3_client_config.max_field_section_size = Some(max_field_section_size);
@@ -740,7 +750,7 @@ impl ClientBuilder {
                             config.quic_max_idle_timeout,
                             config.quic_transport_config,
                             config.tls_info,
-                            None,
+                            config.h3_preconfigured_verifier,
                             config.quic_stream_receive_window,
                             config.quic_receive_window,
                             config.quic_send_window,
@@ -749,6 +759,10 @@ impl ClientBuilder {
                             config.h3_max_frame_size,
                             config.h3_send_grease,
                             config.h3_qpack,
+                            config.h3_coalescing
+                                && config.certs_verification
+                                && config.hostname_verification
+                                && config.tls_sni,
                             config.local_address,
                             &config.http_version_pref,
                         )?;
@@ -943,6 +957,10 @@ impl ClientBuilder {
                             config.h3_max_frame_size,
                             config.h3_send_grease,
                             config.h3_qpack,
+                            config.h3_coalescing
+                                && config.certs_verification
+                                && config.hostname_verification
+                                && config.tls_sni,
                             config.local_address,
                             &config.http_version_pref,
                         )?;
@@ -2603,6 +2621,30 @@ impl ClientBuilder {
     #[cfg(feature = "http3")]
     pub fn http3_qpack(mut self, capacity: u64, blocked_streams: u64) -> ClientBuilder {
         self.config.h3_qpack = (capacity.min(65536), blocked_streams.min(64));
+        self
+    }
+
+    /// Allow authenticated reuse across origins sharing an alternative endpoint.
+    ///
+    /// Disabled by default. Reuse requires the same client, proxy credentials,
+    /// network generation, and destination, and fresh certificate verification
+    /// for the new origin. Client-certificate and ECH routes remain isolated.
+    #[cfg(feature = "http3")]
+    pub fn http3_coalescing(mut self, enabled: bool) -> ClientBuilder {
+        self.config.h3_coalescing = enabled;
+        self
+    }
+
+    /// Supply the matching verifier for a preconfigured rustls HTTP/3 backend.
+    ///
+    /// Required for DNS ECH rebuilding and optional origin coalescing with that
+    /// backend. It must enforce the same trust, revocation, and hostname policy.
+    #[cfg(feature = "http3")]
+    pub fn http3_certificate_verifier(
+        mut self,
+        verifier: Arc<dyn crate::http3::CertificateVerifier>,
+    ) -> ClientBuilder {
+        self.config.h3_preconfigured_verifier = Some(verifier);
         self
     }
 

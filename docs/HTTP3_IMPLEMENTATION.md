@@ -93,3 +93,10 @@ defaults. Full Mem application integration is a separate qualification.
   blocked-section wakeups, ACK/cancellation, sensitive-section bypass, and size
   limits. Keep encoded response headers across cancelled receive futures. Add
   fragmented instruction, prefix wrap, limits, and real header/trailer tests.
+
+- Coalescing batch: opt-in reuse verifies the new origin's chain/name with the
+  configured verifier, preserves proxy and destination identity, and excludes
+  client certificates/ECH. Rejected origins cannot immediately coalesce again.
+  Pool locks now carry a network generation so cancelled old attempts cannot
+  remove or populate a new network's pool. Tests cover opted-out reuse, accepted
+  multi-SAN reuse, rejected SANs, and an old/new generation lock race.

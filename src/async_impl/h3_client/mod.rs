@@ -32,6 +32,7 @@ pub(crate) struct H3Client {
 #[derive(Default)]
 struct RouteHealth {
     generation: u64,
+    coalescing_rejected: std::collections::HashSet<pool::Key>,
     failed: std::collections::HashMap<pool::Key, (u32, std::time::Instant)>,
 }
 
@@ -60,6 +61,24 @@ impl H3Client {
         if let Some(client) = self.pool.try_pool(&key) {
             trace!("getting HTTP/3 client from pool with key {key:?}");
             return Ok(client);
+        }
+        let may_coalesce = {
+            let health = self.health.lock().unwrap();
+            health.coalescing_rejected.len() < 256 && !health.coalescing_rejected.contains(&key)
+        };
+        if may_coalesce {
+            for (previous, client) in self.pool.coalescing_candidates(&key) {
+                if self.connector.can_coalesce(
+                    origin,
+                    &pool::domain_as_uri(previous.clone()),
+                    &key.2,
+                    &client.info.connection,
+                ) {
+                    if let Some(client) = self.pool.alias(key.clone(), &previous) {
+                        return Ok(client);
+                    }
+                }
+            }
         }
         let lock = match self.pool.connecting(&key) {
             pool::Connecting::InProgress(waiter) => {
@@ -122,6 +141,7 @@ impl H3Client {
         if health.generation != generation {
             health.generation = generation;
             health.failed.clear();
+            health.coalescing_rejected.clear();
             self.pool.clear();
             self.connector.network_changed();
             return true;
@@ -186,6 +206,23 @@ impl H3Client {
 
     pub(crate) fn rebind(&self, socket: std::net::UdpSocket) -> Result<(), BoxError> {
         self.connector.rebind(socket)
+    }
+
+    pub(crate) fn reject(
+        &self,
+        origin: &Uri,
+        alternative: Authority,
+        proxy: Option<&crate::proxy::Intercepted>,
+    ) {
+        if let Ok(mut key) = pool::extract_domain(origin) {
+            key.2 = alternative.clone();
+            key.3 = proxy.map(pool::ProxyKey::new);
+            let mut health = self.health.lock().unwrap();
+            if health.coalescing_rejected.len() < 256 {
+                health.coalescing_rejected.insert(key);
+            }
+        }
+        self.remove(origin, alternative, proxy);
     }
 
     pub(crate) fn remove(
