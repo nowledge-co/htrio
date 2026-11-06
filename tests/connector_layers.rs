@@ -268,38 +268,92 @@ fn timeout_layer_blocking_client() {
 #[cfg(feature = "blocking")]
 #[test]
 fn concurrency_layer_blocking_client_timeout() {
-    let _ = env_logger::try_init();
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+
+    struct GatedResolver {
+        address: std::net::SocketAddr,
+        entered: mpsc::Sender<()>,
+        release: Arc<tokio::sync::Notify>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl htrio::dns::Resolve for GatedResolver {
+        fn resolve(&self, _: htrio::dns::Name) -> htrio::dns::Resolving {
+            let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+            let release = self.release.clone();
+            let address = self.address;
+            if first {
+                self.entered.send(()).unwrap();
+            }
+            Box::pin(async move {
+                if first {
+                    release.notified().await;
+                }
+                let addresses: htrio::dns::Addrs = Box::new(std::iter::once(address));
+                Ok(addresses)
+            })
+        }
+    }
 
     let server = server::http(move |_req| async { http::Response::default() });
-
-    let url = format!("http://{}", server.addr());
-
+    let url = format!("http://queued-connector.test:{}/", server.addr().port());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
     let client = htrio::blocking::Client::builder()
-        .connector_layer(DelayLayer::new(Duration::from_millis(100)))
+        .dns_resolver(Arc::new(GatedResolver {
+            address: server.addr(),
+            entered: entered_tx,
+            release: release.clone(),
+            calls: calls.clone(),
+        }))
         .connector_layer(ConcurrencyLimitLayer::new(1))
         .timeout(Duration::from_millis(200))
-        .pool_max_idle_per_host(0) // disable connection reuse to force resource contention on the concurrency limit semaphore
+        .pool_max_idle_per_host(0)
+        .no_proxy()
         .build()
         .unwrap();
 
-    let res = client.get(url.clone()).send();
-
-    assert!(res.is_ok());
-
-    // 3 calls where the second two wait on the first and time out
-    let mut join_handles = Vec::new();
-    for _ in 0..3 {
-        let client = client.clone();
-        let url = url.clone();
-        let join_handle = std::thread::spawn(move || client.get(url.clone()).send());
-        join_handles.push(join_handle);
+    let first_client = client.clone();
+    // Distinct hosts prevent connection-pool coalescing from serializing DNS.
+    let first_url = format!("http://first-connector.test:{}/", server.addr().port());
+    let first_request = std::thread::spawn(move || {
+        first_client
+            .get(first_url)
+            .timeout(Duration::from_secs(10))
+            .send()
+    });
+    let entered = entered_rx.recv_timeout(Duration::from_secs(5));
+    if entered.is_err() {
+        release.notify_one();
+        let first = first_request.join().unwrap();
+        panic!("first connection did not enter the resolver: {entered:?}, {first:?}");
     }
 
-    let timed_out = join_handles
-        .into_iter()
-        .any(|handle| handle.join().unwrap().is_err_and(|err| err.is_timeout()));
+    // Keep the only connector permit occupied until the queued request expires.
+    // Thread start times and scheduler delays cannot remove this contention.
+    let queued = client.get(&url).send();
+    release.notify_one();
+    let first = first_request.join().unwrap();
 
-    assert!(timed_out, "at least one request should have timed out");
+    assert!(
+        first.is_ok(),
+        "the released connection should succeed: {first:?}"
+    );
+    assert!(queued.unwrap_err().is_timeout());
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "queued connection reached DNS"
+    );
+
+    client
+        .get(url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[cfg(feature = "blocking")]
