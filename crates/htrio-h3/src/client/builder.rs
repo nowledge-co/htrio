@@ -78,6 +78,13 @@ impl Builder {
         self
     }
 
+    /// Bound encoded payloads buffered for non-DATA frames (default: 1 MiB).
+    /// Unknown frames are skipped without buffering their complete payloads.
+    pub fn max_frame_size(&mut self, size: u64) -> &mut Self {
+        self.config.max_frame_size = size;
+        self
+    }
+
     /// Set the maximum header size this client is willing to accept
     ///
     /// See [header size constraints] section of the specification for details.
@@ -131,6 +138,7 @@ impl Builder {
             open,
             conn_state,
             max_field_section_size: self.config.settings.max_field_section_size,
+            max_frame_size: self.config.max_frame_size,
             sender_count: Arc::new(AtomicUsize::new(1)),
             send_grease_frame: self.config.send_grease,
             _buf: PhantomData,

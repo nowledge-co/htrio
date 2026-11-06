@@ -20,7 +20,9 @@ Local changes are tracked in this repository and shipped with htrio.
 - Point adapter-backed upstream tests at the sibling `htrio-h3-quinn` source.
   No QUIC transport implementation is vendored into this crate.
 
-The protocol implementation is unchanged.
+- Bound decoded field sections and buffered frames; skip unknown payloads incrementally.
+- Expose connection availability after GOAWAY and peer upload-stop polling.
+- Keep request stream receive ownership intact across pending polls.
 
 Run the inherited protocol suite with `cargo test -p htrio-h3 --all-features
 --lib -- --test-threads=2`. The inherited tests use the optional backend

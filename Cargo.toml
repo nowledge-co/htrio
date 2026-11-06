@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [".", "crates/htrio-h3", "crates/htrio-h3-quinn", "crates/htrio-h3-datagram"]
+members = [".", "crates/htrio-h3", "crates/htrio-h3-quinn", "crates/htrio-h3-datagram", "crates/htrio-quinn", "crates/htrio-quinn-proto", "crates/htrio-quinn-udp"]
 default-members = ["."]
 
 [package]
@@ -164,7 +164,7 @@ once_cell = { version = "1.18", optional = true }
 # HTTP/3 transport
 h3 = { package = "htrio-h3", path = "crates/htrio-h3", version = "=0.0.8", optional = true }
 h3-quinn = { package = "htrio-h3-quinn", path = "crates/htrio-h3-quinn", version = "=0.0.10", optional = true }
-quinn = { version = "0.11.1", default-features = false, features = ["runtime-tokio"], optional = true }
+quinn = { package = "htrio-quinn", path = "crates/htrio-quinn", version = "0.11.12", default-features = false, features = ["runtime-tokio"], optional = true }
 futures-channel = { version = "0.3", optional = true }
 
 [dev-dependencies]

@@ -76,3 +76,14 @@ jobs:
         run: cargo test -p htrio-h3 --locked -j 2 --all-features --lib -- --test-threads=2
       - name: Local Quinn adapter
         run: cargo test -p htrio-h3-quinn -p htrio-h3-datagram --locked -j 2 --all-features -- --test-threads=2
+
+  quinn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Local QUIC transport and UDP regression suites
+        run: cargo test -p htrio-quinn -p htrio-quinn-proto -p htrio-quinn-udp --locked -j 2 --lib --tests -- --test-threads=2

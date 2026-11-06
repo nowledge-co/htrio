@@ -323,7 +323,7 @@ impl FrameType {
 pub struct FrameType(u64);
 
 impl FrameType {
-    fn decode<B: Buf>(buf: &mut B) -> Result<Self, UnexpectedEnd> {
+    pub(crate) fn decode<B: Buf>(buf: &mut B) -> Result<Self, UnexpectedEnd> {
         Ok(FrameType(buf.get_var()?))
     }
     pub fn encode<B: BufMut>(&self, buf: &mut B) {

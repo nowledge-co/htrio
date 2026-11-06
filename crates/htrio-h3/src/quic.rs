@@ -169,6 +169,15 @@ pub trait OpenStreams<B: Buf> {
 
 /// A trait describing the "send" actions of a QUIC stream.
 pub trait SendStream<B: Buf> {
+    /// Poll peer cancellation even when the application has no bytes to write.
+    /// Adapters without cancellation notifications may retain the default.
+    fn poll_stopped(
+        &mut self,
+        _cx: &mut task::Context<'_>,
+    ) -> Poll<Result<(), StreamErrorIncoming>> {
+        Poll::Pending
+    }
+
     /// Polls if the stream can send more data.
     fn poll_ready(&mut self, cx: &mut task::Context<'_>) -> Poll<Result<(), StreamErrorIncoming>>;
 

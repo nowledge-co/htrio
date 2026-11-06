@@ -279,7 +279,8 @@ pub(crate) fn is_retryable_error(err: &crate::Error) -> bool {
     while let Some(cause) = source {
         #[cfg(feature = "http3")]
         if let Some(error) = cause.downcast_ref::<h3::error::StreamError>() {
-            if matches!(error, h3::error::StreamError::RemoteTerminate { code, .. } if *code == h3::error::Code::H3_REQUEST_REJECTED)
+            if error.is_remote_closing()
+                || matches!(error, h3::error::StreamError::RemoteTerminate { code, .. } if *code == h3::error::Code::H3_REQUEST_REJECTED)
             {
                 return true;
             }

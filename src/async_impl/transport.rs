@@ -112,7 +112,7 @@ mod http3 {
                         )
                         .await;
                     match prepared {
-                        Ok(mut connection) => {
+                        Ok(connection) => {
                             let replay = clone_request(&request);
                             *request.version_mut() = Version::HTTP_3;
                             request.headers_mut().insert(
@@ -123,7 +123,17 @@ mod http3 {
                                     .parse()
                                     .expect("valid authority"),
                             );
-                            match connection.send_request(request).await {
+                            match self
+                                .dispatch(
+                                    connection,
+                                    request,
+                                    &origin,
+                                    Some(alternative.authority.clone()),
+                                    proxy.as_ref(),
+                                    true,
+                                )
+                                .await
+                            {
                                 Ok(response)
                                     if response.status() == StatusCode::MISDIRECTED_REQUEST =>
                                 {
@@ -167,10 +177,10 @@ mod http3 {
             }
 
             if forced {
-                let mut connection = self.prepare(&origin, None, proxy.as_ref(), false).await?;
+                let connection = self.prepare(&origin, None, proxy.as_ref(), false).await?;
                 *request.version_mut() = Version::HTTP_3;
-                let response = connection
-                    .send_request(request)
+                let response = self
+                    .dispatch(connection, request, &origin, None, proxy.as_ref(), false)
                     .await
                     .map_err(error::request)?;
                 self.observe(&origin, &response, started);
@@ -184,6 +194,36 @@ mod http3 {
                 .map(boxed);
             self.observe(&origin, &response, started);
             Ok(response)
+        }
+
+        async fn dispatch(
+            &mut self,
+            mut connection: PoolClient,
+            request: Request<Body>,
+            origin: &Uri,
+            alternative: Option<http::uri::Authority>,
+            proxy: Option<&crate::proxy::Intercepted>,
+            automatic: bool,
+        ) -> Result<Response<ResponseBody>, BoxError> {
+            let mut pending = Some(request);
+            for attempt in 0..2 {
+                let result = connection.send_request(&mut pending).await;
+                if result.is_ok() || pending.is_none() || attempt == 1 {
+                    return result;
+                }
+                self.client.as_ref().unwrap().remove(
+                    origin,
+                    alternative
+                        .clone()
+                        .unwrap_or_else(|| origin.authority().unwrap().clone()),
+                    proxy,
+                );
+                connection = self
+                    .prepare(origin, alternative.clone(), proxy, automatic)
+                    .await
+                    .map_err(|error| Box::new(error) as BoxError)?;
+            }
+            unreachable!("bounded reconnect returns a result")
         }
 
         async fn prepare(

@@ -66,6 +66,13 @@ impl Builder {
         self
     }
 
+    /// Bound encoded payloads buffered for non-DATA frames (default: 1 MiB).
+    /// Unknown frames are skipped without buffering their complete payloads.
+    pub fn max_frame_size(&mut self, size: u64) -> &mut Self {
+        self.config.max_frame_size = size;
+        self
+    }
+
     /// Set the maximum header size this client is willing to accept
     ///
     /// See [header size constraints] section of the specification for details.

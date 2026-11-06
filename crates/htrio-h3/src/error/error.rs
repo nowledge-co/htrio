@@ -137,6 +137,11 @@ pub enum StreamError {
 }
 
 impl StreamError {
+    /// Whether GOAWAY prevented opening a request stream before dispatch.
+    pub fn is_remote_closing(&self) -> bool {
+        matches!(self, Self::RemoteClosing)
+    }
+
     /// Returns if the error is H3_NO_ERROR
     pub fn is_h3_no_error(&self) -> bool {
         match self {

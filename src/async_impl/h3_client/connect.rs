@@ -35,6 +35,7 @@ pub(crate) struct H3ClientConfig {
     /// [header size constraints]: https://www.rfc-editor.org/rfc/rfc9114.html#name-header-size-constraints
     ///
     pub(crate) max_field_section_size: Option<u64>,
+    pub(crate) max_frame_size: Option<u64>,
 
     /// Send reserved protocol values to exercise peers' extension handling.
     pub(crate) send_grease: Option<bool>,
@@ -44,6 +45,7 @@ impl Default for H3ClientConfig {
     fn default() -> Self {
         Self {
             max_field_section_size: None,
+            max_frame_size: None,
             send_grease: None,
         }
     }
@@ -290,6 +292,9 @@ impl H3Connector {
         builder.enable_extended_connect(true);
         if let Some(size) = config.max_field_section_size {
             builder.max_field_section_size(size);
+        }
+        if let Some(size) = config.max_frame_size {
+            builder.max_frame_size(size);
         }
         if let Some(grease) = config.send_grease {
             builder.send_grease(grease);

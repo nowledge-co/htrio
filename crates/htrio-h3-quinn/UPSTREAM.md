@@ -23,4 +23,6 @@ Local changes are tracked in this repository and shipped with htrio.
 - Point the optional `datagram` feature at sibling `htrio-h3-datagram` to avoid
   mixing protocol types with a second, registry-sourced h3 package.
 
-The adapter implementation is unchanged. Quinn remains an upstream dependency.
+- Use sibling `htrio-quinn`, retaining its public library name.
+- Poll chunks directly from an owned receive stream so cancellation remains safe.
+- Forward peer STOP_SENDING notifications even when source-body reads are pending.

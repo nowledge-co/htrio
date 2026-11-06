@@ -278,6 +278,8 @@ struct Config {
     #[cfg(feature = "http3")]
     h3_max_field_section_size: Option<u64>,
     #[cfg(feature = "http3")]
+    h3_max_frame_size: Option<u64>,
+    #[cfg(feature = "http3")]
     h3_send_grease: Option<bool>,
     #[cfg(feature = "http3")]
     alt_svc: bool,
@@ -411,6 +413,8 @@ impl ClientBuilder {
                 #[cfg(feature = "http3")]
                 h3_max_field_section_size: None,
                 #[cfg(feature = "http3")]
+                h3_max_frame_size: None,
+                #[cfg(feature = "http3")]
                 h3_send_grease: None,
                 #[cfg(feature = "http3")]
                 alt_svc: true,
@@ -521,6 +525,7 @@ impl ClientBuilder {
                  quic_send_window,
                  quic_congestion_bbr,
                  h3_max_field_section_size,
+                 h3_max_frame_size,
                  h3_send_grease,
                  local_address,
                  http_version_pref: &HttpVersionPref| {
@@ -554,6 +559,8 @@ impl ClientBuilder {
                     if let Some(max_field_section_size) = h3_max_field_section_size {
                         h3_client_config.max_field_section_size = Some(max_field_section_size);
                     }
+
+                    h3_client_config.max_frame_size = h3_max_frame_size;
 
                     if let Some(send_grease) = h3_send_grease {
                         h3_client_config.send_grease = Some(send_grease);
@@ -721,6 +728,7 @@ impl ClientBuilder {
                             config.quic_send_window,
                             config.quic_congestion_bbr,
                             config.h3_max_field_section_size,
+                            config.h3_max_frame_size,
                             config.h3_send_grease,
                             config.local_address,
                             &config.http_version_pref,
@@ -925,6 +933,7 @@ impl ClientBuilder {
                             config.quic_send_window,
                             config.quic_congestion_bbr,
                             config.h3_max_field_section_size,
+                            config.h3_max_frame_size,
                             config.h3_send_grease,
                             config.local_address,
                             &config.http_version_pref,
@@ -2533,6 +2542,17 @@ impl ClientBuilder {
     #[cfg_attr(docsrs, doc(cfg(feature = "http3")))]
     pub fn http3_max_field_section_size(mut self, value: u64) -> ClientBuilder {
         self.config.h3_max_field_section_size = Some(value.try_into().unwrap());
+        self
+    }
+
+    /// Limit encoded HTTP/3 headers and control frames buffered by the parser.
+    ///
+    /// The default is 1 MiB. DATA and unknown extension payloads are streamed
+    /// incrementally and do not count toward this per-frame allocation limit.
+    #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "http3")))]
+    pub fn http3_max_frame_size(mut self, bytes: u64) -> ClientBuilder {
+        self.config.h3_max_frame_size = Some(bytes);
         self
     }
 

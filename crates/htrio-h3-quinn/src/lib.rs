@@ -26,7 +26,6 @@ use h3::{
     error::Code,
     quic::{self, ConnectionErrorIncoming, StreamErrorIncoming, StreamId, WriteBuf},
 };
-use tokio_util::sync::ReusableBoxFuture;
 
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -306,6 +305,13 @@ impl<B> quic::SendStream<B> for BidiStream<B>
 where
     B: Buf,
 {
+    fn poll_stopped(
+        &mut self,
+        cx: &mut task::Context<'_>,
+    ) -> Poll<Result<(), StreamErrorIncoming>> {
+        self.send.poll_stopped(cx)
+    }
+
     fn poll_ready(&mut self, cx: &mut task::Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
         self.send.poll_ready(cx)
     }
@@ -343,25 +349,12 @@ where
 ///
 /// Implements a [`quic::RecvStream`] backed by a [`quinn::RecvStream`].
 pub struct RecvStream {
-    stream: Option<quinn::RecvStream>,
-    read_chunk_fut: ReadChunkFuture,
+    stream: quinn::RecvStream,
 }
-
-type ReadChunkFuture = ReusableBoxFuture<
-    'static,
-    (
-        quinn::RecvStream,
-        Result<Option<quinn::Chunk>, quinn::ReadError>,
-    ),
->;
 
 impl RecvStream {
     fn new(stream: quinn::RecvStream) -> Self {
-        Self {
-            stream: Some(stream),
-            // Should only allocate once the first time it's used
-            read_chunk_fut: ReusableBoxFuture::new(async { unreachable!() }),
-        }
+        Self { stream }
     }
 }
 
@@ -373,32 +366,25 @@ impl quic::RecvStream for RecvStream {
         &mut self,
         cx: &mut task::Context<'_>,
     ) -> Poll<Result<Option<Self::Buf>, StreamErrorIncoming>> {
-        if let Some(mut stream) = self.stream.take() {
-            self.read_chunk_fut.set(async move {
-                let chunk = stream.read_chunk(usize::MAX, true).await;
-                (stream, chunk)
+        self.stream
+            .poll_read_chunk(cx, usize::MAX, true)
+            .map(|result| {
+                result
+                    .map(|chunk| chunk.map(|chunk| chunk.bytes))
+                    .map_err(convert_read_error_to_stream_error)
             })
-        };
-
-        let (stream, chunk) = ready!(self.read_chunk_fut.poll(cx));
-        self.stream = Some(stream);
-        Poll::Ready(Ok(chunk
-            .map_err(|e| convert_read_error_to_stream_error(e))?
-            .map(|c| c.bytes)))
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     fn stop_sending(&mut self, error_code: u64) {
         self.stream
-            .as_mut()
-            .unwrap()
             .stop(VarInt::from_u64(error_code).expect("invalid error_code"))
             .ok();
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     fn recv_id(&self) -> StreamId {
-        let num: u64 = self.stream.as_ref().unwrap().id().into();
+        let num: u64 = self.stream.id().into();
 
         num.try_into().expect("invalid stream id")
     }
@@ -442,7 +428,11 @@ fn convert_write_error_to_stream_error(error: quinn::WriteError) -> StreamErrorI
 pub struct SendStream<B: Buf> {
     stream: quinn::SendStream,
     writing: Option<WriteBuf<B>>,
+    stopped: Option<StoppedFuture>,
 }
+
+type StoppedFuture =
+    Pin<Box<dyn Future<Output = Result<Option<VarInt>, quinn::StoppedError>> + Send + Sync>>;
 
 impl<B> SendStream<B>
 where
@@ -452,6 +442,7 @@ where
         Self {
             stream: stream,
             writing: None,
+            stopped: None,
         }
     }
 }
@@ -460,6 +451,27 @@ impl<B> quic::SendStream<B> for SendStream<B>
 where
     B: Buf,
 {
+    fn poll_stopped(
+        &mut self,
+        cx: &mut task::Context<'_>,
+    ) -> Poll<Result<(), StreamErrorIncoming>> {
+        let stopped = self
+            .stopped
+            .get_or_insert_with(|| Box::pin(self.stream.stopped()));
+        match ready!(stopped.as_mut().poll(cx)) {
+            Ok(Some(code)) => Poll::Ready(Err(StreamErrorIncoming::StreamTerminated {
+                error_code: code.into_inner(),
+            })),
+            Ok(None) => Poll::Ready(Ok(())),
+            Err(quinn::StoppedError::ConnectionLost(error)) => {
+                Poll::Ready(Err(StreamErrorIncoming::ConnectionErrorIncoming {
+                    connection_error: convert_connection_error(error),
+                }))
+            }
+            Err(error) => Poll::Ready(Err(StreamErrorIncoming::Unknown(Box::new(error)))),
+        }
+    }
+
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     fn poll_ready(&mut self, cx: &mut task::Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
         if let Some(ref mut data) = self.writing {

@@ -1,7 +1,7 @@
 use bytes::Buf;
 use futures_util::future;
 use http::{HeaderMap, Response};
-use quic::StreamId;
+use quic::{SendStream as _, StreamId};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
@@ -239,6 +239,14 @@ where
     S: quic::SendStream<B>,
     B: Buf,
 {
+    /// Observe peer cancellation while an upload source is pending.
+    pub fn poll_stopped(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamError>> {
+        self.inner
+            .stream
+            .poll_stopped(cx)
+            .map_err(|error| self.handle_quic_stream_error(error))
+    }
+
     /// Send some data on the request body.
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     pub async fn send_data(&mut self, buf: B) -> Result<(), StreamError> {

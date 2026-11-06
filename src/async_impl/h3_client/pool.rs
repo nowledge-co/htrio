@@ -6,7 +6,7 @@
 
 use bytes::Bytes;
 use std::collections::HashMap;
-use std::future;
+use std::future::{self, Future};
 use std::pin::Pin;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -23,7 +23,7 @@ use h3::client::SendRequest;
 use h3_quinn::{Connection, OpenStreams};
 use http::uri::{Authority, Scheme};
 use http::{Request, Response, Uri};
-use log::{error, trace};
+use log::trace;
 
 // Include both authorities: an alternative can serve several origins, and an
 // origin can move between alternatives without reusing a stale connection.
@@ -269,73 +269,211 @@ impl PoolClient {
 
     pub async fn send_request(
         &mut self,
-        req: Request<Body>,
+        request: &mut Option<Request<Body>>,
     ) -> Result<Response<ResponseBody>, BoxError> {
         use hyper::body::Body as _;
 
-        let (head, mut req_body) = req.into_parts();
-        let mut req = Request::from_parts(head, ());
-
-        if let Some(n) = req_body.size_hint().exact() {
-            if n > 0 {
-                req.headers_mut()
-                    .insert(http::header::CONTENT_LENGTH, n.into());
+        let (mut head, req_body) = request
+            .take()
+            .expect("request has not been dispatched")
+            .into_parts();
+        let declared = content_length(&head.headers)?;
+        if let Some(exact) = req_body.size_hint().exact() {
+            if declared.is_some_and(|length| length != exact) {
+                return Err("request Content-Length does not match the body".into());
+            }
+            if exact > 0 || declared.is_some() {
+                head.headers
+                    .insert(http::header::CONTENT_LENGTH, exact.into());
             }
         }
-
-        let (mut send, mut recv) = self.inner.send_request(req).await?.split();
-
+        let expected_upload = content_length(&head.headers)?;
+        let head_request = head.method == http::Method::HEAD;
+        let mut wire = Request::new(());
+        *wire.method_mut() = head.method.clone();
+        *wire.uri_mut() = head.uri.clone();
+        *wire.version_mut() = head.version;
+        *wire.headers_mut() = head.headers.clone();
+        *wire.extensions_mut() = head.extensions.clone();
+        let stream = match self.inner.send_request(wire).await {
+            Ok(stream) => stream,
+            Err(error) if error.is_remote_closing() => {
+                // This error is raised before opening a stream or consuming the
+                // source body. Return ownership for a bounded reconnect attempt.
+                *request = Some(Request::from_parts(head, req_body));
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let (send, mut recv) = stream.split();
+        let upload = SendGuard {
+            stream: send,
+            finished: false,
+        };
         let (tx, mut rx) = oneshot::channel::<Result<(), BoxError>>();
-        tokio::spawn(async move {
-            let mut req_body = Pin::new(&mut req_body);
-            loop {
-                match std::future::poll_fn(|cx| req_body.as_mut().poll_frame(cx)).await {
-                    Some(Ok(frame)) => {
-                        if let Ok(b) = frame.into_data() {
-                            if let Err(e) = send.send_data(b).await {
-                                if is_stop_sending(&e) {
-                                    let _ = tx.send(Ok(()));
-                                    return;
-                                }
-                                if let Err(e) = tx.send(Err(e.into())) {
-                                    error!("Failed to communicate send.send_data() error: {e:?}");
-                                }
-                                return;
-                            }
-                        }
-                    }
-                    Some(Err(e)) => {
-                        if let Err(e) = tx.send(Err(e.into())) {
-                            error!("Failed to communicate req_body read error: {e:?}");
-                        }
-                        return;
-                    }
-
-                    None => break,
-                }
-            }
-
-            if let Err(e) = send.finish().await {
-                if !is_stop_sending(&e) {
-                    if let Err(e) = tx.send(Err(e.into())) {
-                        error!("Failed to communicate send.finish read error: {e:?}");
-                    }
-                    return;
-                }
-            }
-
-            let _ = tx.send(Ok(()));
+        let task = tokio::spawn(async move {
+            let result = send_body(upload, req_body, expected_upload).await;
+            let _ = tx.send(result);
         });
+        let upload = UploadTask(task.abort_handle());
+        let mut upload_done = false;
+        let mut informational = 0;
+        let response = loop {
+            tokio::select! {
+                result = &mut rx, if !upload_done => {
+                    upload_done = true;
+                    match result {
+                        Ok(Ok(())) => {},
+                        Ok(Err(error)) => return Err(error),
+                        Err(_) => return Err("HTTP/3 upload task terminated".into()),
+                    }
+                }
+                response = recv.recv_response() => {
+                    let response = response?;
+                    if response.status() == http::StatusCode::SWITCHING_PROTOCOLS {
+                        recv.stop_sending(h3::error::Code::H3_MESSAGE_ERROR);
+                        return Err("HTTP/3 forbids a 101 response".into());
+                    }
+                    if response.status().is_informational() {
+                        informational += 1;
+                        if informational > 64 {
+                            recv.stop_sending(h3::error::Code::H3_EXCESSIVE_LOAD);
+                            return Err("too many HTTP/3 informational responses".into());
+                        }
+                        continue;
+                    }
+                    break response;
+                }
+            }
+        };
+        let no_body = head_request || matches!(response.status().as_u16(), 204 | 205 | 304);
+        let declared = content_length(response.headers())?;
+        let remaining = if no_body { Some(0) } else { declared };
+        let body = Incoming {
+            inner: recv,
+            remaining,
+            send_rx: rx,
+            send_done: upload_done,
+            reading_trailers: false,
+            done: false,
+            _upload: upload,
+        };
+        Ok(response.map(|_| crate::async_impl::body::boxed(body)))
+    }
+}
 
-        tokio::select! {
-            Ok(Err(e)) = &mut rx => Err(e),
-            resp = recv.recv_response() => {
-                let resp = resp?;
-                let resp_body = crate::async_impl::body::boxed(Incoming::new(recv, resp.headers(), rx));
-                Ok(resp.map(|_| resp_body))
+/// Cancelling a request or dropping its response also cancels source-body reads.
+struct UploadTask(tokio::task::AbortHandle);
+
+impl Drop for UploadTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+struct SendGuard {
+    stream: h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
+    finished: bool,
+}
+
+impl Drop for SendGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.stream
+                .stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+        }
+    }
+}
+
+async fn send_body(mut send: SendGuard, body: Body, expected: Option<u64>) -> Result<(), BoxError> {
+    use http_body::Body as _;
+    let mut body = Box::pin(body);
+    let mut remaining = expected;
+    let mut trailers = None;
+    loop {
+        let frame = tokio::select! {
+            stopped = std::future::poll_fn(|cx| send.stream.poll_stopped(cx)) => {
+                match stopped {
+                    Ok(()) => {},
+                    Err(error) if is_stop_sending(&error) => {},
+                    Err(error) => return Err(error.into()),
+                }
+                send.finished = true;
+                return Ok(());
+            }
+            frame = std::future::poll_fn(|cx| body.as_mut().poll_frame(cx)) => frame,
+        };
+        let Some(frame) = frame else {
+            break;
+        };
+        match frame?.into_data() {
+            Ok(data) => {
+                if trailers.is_some() {
+                    return Err("request DATA after trailers".into());
+                }
+                if let Some(length) = remaining.as_mut() {
+                    *length = length
+                        .checked_sub(data.len() as u64)
+                        .ok_or("request body exceeds Content-Length")?;
+                }
+                if let Err(error) = send.stream.send_data(data).await {
+                    if is_stop_sending(&error) {
+                        send.finished = true;
+                        return Ok(());
+                    }
+                    return Err(error.into());
+                }
+            }
+            Err(frame) => {
+                if let Ok(headers) = frame.into_trailers() {
+                    validate_trailers(&headers)?;
+                    if trailers.replace(headers).is_some() {
+                        return Err("multiple request trailer sections".into());
+                    }
+                }
             }
         }
     }
+    if remaining.is_some_and(|length| length != 0) {
+        return Err("request body shorter than Content-Length".into());
+    }
+    if let Some(trailers) = trailers {
+        send.stream.send_trailers(trailers).await?;
+    }
+    if let Err(error) = send.stream.finish().await {
+        if !is_stop_sending(&error) {
+            return Err(error.into());
+        }
+    }
+    send.finished = true;
+    Ok(())
+}
+
+fn content_length(headers: &http::HeaderMap) -> Result<Option<u64>, BoxError> {
+    let mut expected = None;
+    for value in headers.get_all(http::header::CONTENT_LENGTH) {
+        for part in value.to_str()?.split(',') {
+            let part = part.trim();
+            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err("invalid Content-Length".into());
+            }
+            let length = part.parse::<u64>()?;
+            if expected.is_some_and(|expected| expected != length) {
+                return Err("conflicting Content-Length values".into());
+            }
+            expected = Some(length);
+        }
+    }
+    Ok(expected)
+}
+
+fn validate_trailers(headers: &http::HeaderMap) -> Result<(), BoxError> {
+    if headers.contains_key(http::header::CONTENT_LENGTH)
+        || headers.contains_key(http::header::TRANSFER_ENCODING)
+    {
+        return Err("framing headers are forbidden in trailers".into());
+    }
+    Ok(())
 }
 
 pub struct PoolConnection {
@@ -360,6 +498,9 @@ impl PoolConnection {
     }
 
     pub fn is_invalid(&self) -> bool {
+        if !self.client.inner.is_available() {
+            return true;
+        }
         match self.close_rx.try_recv() {
             Err(TryRecvError::Empty) => false,
             Err(TryRecvError::Disconnected) => true,
@@ -368,59 +509,108 @@ impl PoolConnection {
     }
 }
 
-struct Incoming<S, B> {
+struct Incoming<S: h3::quic::RecvStream, B: Buf> {
     inner: h3::client::RequestStream<S, B>,
-    content_length: Option<u64>,
+    remaining: Option<u64>,
     send_rx: oneshot::Receiver<Result<(), BoxError>>,
+    send_done: bool,
+    reading_trailers: bool,
+    done: bool,
+    _upload: UploadTask,
 }
 
-impl<S, B> Incoming<S, B> {
-    fn new(
-        stream: h3::client::RequestStream<S, B>,
-        headers: &http::header::HeaderMap,
-        send_rx: oneshot::Receiver<Result<(), BoxError>>,
-    ) -> Self {
-        Self {
-            inner: stream,
-            content_length: headers
-                .get(http::header::CONTENT_LENGTH)
-                .and_then(|h| h.to_str().ok())
-                .and_then(|v| v.parse().ok()),
-            send_rx,
+impl<S: h3::quic::RecvStream, B: Buf> Drop for Incoming<S, B> {
+    fn drop(&mut self) {
+        if !self.done {
+            self.inner
+                .stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
         }
+    }
+}
+
+impl<S: h3::quic::RecvStream, B: Buf> Incoming<S, B> {
+    fn fail(
+        &mut self,
+        error: impl Into<BoxError>,
+    ) -> Poll<Option<Result<http_body::Frame<Bytes>, crate::Error>>> {
+        self.done = true;
+        self.inner.stop_sending(h3::error::Code::H3_MESSAGE_ERROR);
+        Poll::Ready(Some(Err(crate::error::body(error))))
     }
 }
 
 impl<S, B> http_body::Body for Incoming<S, B>
 where
     S: h3::quic::RecvStream,
+    B: Buf,
 {
     type Data = Bytes;
     type Error = crate::error::Error;
 
     fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context,
-    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
-        if let Ok(Err(e)) = self.send_rx.try_recv() {
-            return Poll::Ready(Some(Err(crate::error::body(e))));
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+        let this = self.get_mut();
+        if this.done {
+            return Poll::Ready(None);
         }
-
-        match futures_core::ready!(self.inner.poll_recv_data(cx)) {
-            Ok(Some(mut b)) => Poll::Ready(Some(Ok(hyper::body::Frame::data(
-                b.copy_to_bytes(b.remaining()),
-            )))),
-            Ok(None) => Poll::Ready(None),
-            Err(e) => Poll::Ready(Some(Err(crate::error::body(e)))),
+        if !this.send_done {
+            match Pin::new(&mut this.send_rx).poll(cx) {
+                Poll::Ready(Ok(Err(error))) => return this.fail(error),
+                Poll::Ready(Err(_)) => return this.fail("HTTP/3 upload task terminated"),
+                Poll::Ready(Ok(Ok(()))) => this.send_done = true,
+                Poll::Pending => {}
+            }
+        }
+        if !this.reading_trailers {
+            match futures_core::ready!(this.inner.poll_recv_data(cx)) {
+                Ok(Some(mut data)) => {
+                    if let Some(remaining) = this.remaining.as_mut() {
+                        let Some(next) = remaining.checked_sub(data.remaining() as u64) else {
+                            return this.fail("response body exceeds Content-Length");
+                        };
+                        *remaining = next;
+                    }
+                    return Poll::Ready(Some(Ok(http_body::Frame::data(
+                        data.copy_to_bytes(data.remaining()),
+                    ))));
+                }
+                Ok(None) => {
+                    if this.remaining.is_some_and(|remaining| remaining != 0) {
+                        return this.fail("response body shorter than Content-Length");
+                    }
+                    this.reading_trailers = true;
+                }
+                Err(error) => return this.fail(error),
+            }
+        }
+        match futures_core::ready!(this.inner.poll_recv_trailers(cx)) {
+            Ok(trailers) => {
+                this.done = true;
+                match trailers {
+                    Some(trailers) => match validate_trailers(&trailers) {
+                        Ok(()) => Poll::Ready(Some(Ok(http_body::Frame::trailers(trailers)))),
+                        Err(error) => this.fail(error),
+                    },
+                    None => Poll::Ready(None),
+                }
+            }
+            Err(error) => this.fail(error),
         }
     }
 
-    fn size_hint(&self) -> hyper::body::SizeHint {
-        if let Some(content_length) = self.content_length {
-            hyper::body::SizeHint::with_exact(content_length)
-        } else {
-            hyper::body::SizeHint::default()
+    fn is_end_stream(&self) -> bool {
+        self.done
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        if self.done {
+            return http_body::SizeHint::with_exact(0);
         }
+        self.remaining
+            .map(http_body::SizeHint::with_exact)
+            .unwrap_or_default()
     }
 }
 

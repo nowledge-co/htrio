@@ -1,5 +1,7 @@
 //! Client implementation of the HTTP/3 protocol
 
+use crate::quic::{RecvStream as _, SendStream as _};
+
 use std::{
     marker::PhantomData,
     sync::{atomic::AtomicUsize, Arc},
@@ -113,6 +115,7 @@ where
 {
     pub(super) open: T,
     pub(super) conn_state: Arc<SharedState>,
+    pub(super) max_frame_size: u64,
     pub(super) max_field_section_size: u64, // maximum size for a header we receive
     // counts instances of SendRequest to close the connection when the last is dropped.
     pub(super) sender_count: Arc<AtomicUsize>,
@@ -142,6 +145,14 @@ where
     T: quic::OpenStreams<B>,
     B: Buf,
 {
+    /// Whether this connection can still accept new requests.
+    ///
+    /// A received GOAWAY immediately retires the connection, even while existing
+    /// streams continue. Pools must stop selecting it before the driver closes.
+    pub fn is_available(&self) -> bool {
+        !self.is_closing() && self.get_conn_error().is_none()
+    }
+
     /// Send an HTTP/3 request to the server
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     pub async fn send_request(
@@ -174,6 +185,14 @@ where
         let mut stream = future::poll_fn(|cx| self.open.poll_open_bidi(cx))
             .await
             .map_err(|e| self.handle_quic_stream_error(e))?;
+
+        // Opening may wait for the peer's stream limit while the driver receives
+        // GOAWAY. No request bytes have been written, so reconnect remains safe.
+        if let Some(error) = self.check_peer_connection_closing() {
+            stream.stop_sending(Code::H3_REQUEST_CANCELLED.value());
+            stream.reset(Code::H3_REQUEST_CANCELLED.value());
+            return Err(error);
+        }
 
         //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2
         //= type=TODO
@@ -216,7 +235,8 @@ where
 
         let request_stream = RequestStream {
             inner: connection::RequestStream::new(
-                FrameStream::new(BufRecvStream::new(stream)),
+                FrameStream::new(BufRecvStream::new(stream))
+                    .with_max_frame_size(self.max_frame_size),
                 self.max_field_section_size,
                 self.conn_state.clone(),
                 self.send_grease_frame,
@@ -241,6 +261,7 @@ where
             conn_state: self.conn_state.clone(),
             open: self.open.clone(),
             max_field_section_size: self.max_field_section_size,
+            max_frame_size: self.max_frame_size,
             sender_count: self.sender_count.clone(),
             _buf: PhantomData,
             send_grease_frame: self.send_grease_frame,

@@ -195,7 +195,7 @@ explicitly ignored. [CI](.github/workflows/ci.yml) defines Linux, macOS, Windows
 MSRV, native TLS, and feature-profile checks.
 
 The [local dependency crates](crates/README.md) are committed in this workspace.
-Quinn remains an upstream dependency. See [UPSTREAM.md](UPSTREAM.md) for pinned
+Quinn, its protocol engine, and its UDP adapter are sibling workspace crates. See [UPSTREAM.md](UPSTREAM.md) for pinned
 source revisions, licenses, and maintenance boundaries.
 
 ## License

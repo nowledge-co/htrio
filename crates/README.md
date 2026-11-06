@@ -9,9 +9,12 @@ with htrio. No separate repository or submodule is required.
 | `htrio-h3-quinn` | hyperium/h3 0.0.10 | Use the same local h3 protocol types and preserve upstream h3's adapter-backed regression tests. |
 | `htrio-h3-datagram` | hyperium/h3 0.0.2 | Preserve type identity for the adapter's optional native DATAGRAM extension. |
 
-Each crate retains its upstream license and revision metadata. htrio-h3-quinn's
-implementation is unchanged; its h3 and optional datagram dependencies use sibling paths. Path
-dependencies preserve type identity when htrio is consumed from another
+| `htrio-quinn` | quinn-rs/quinn 0.11.12 | Own Tokio QUIC integration and cancellation-safe chunk polling. |
+| `htrio-quinn-proto` | quinn-rs/quinn 0.11.19 | Own the transport state machine, recovery, and congestion implementation. |
+| `htrio-quinn-udp` | quinn-rs/quinn 0.5.16 | Own platform UDP/GSO/GRO integration. |
+
+Each crate retains its upstream license and revision metadata. The adapter uses
+owned receive streams and propagates peer upload cancellation. Path dependencies preserve type identity when htrio is consumed from another
 workspace. The root package and local dependencies are not configured for
 crates.io publication; release naming/versioning must be decided first.
 

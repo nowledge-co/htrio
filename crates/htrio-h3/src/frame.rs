@@ -1,5 +1,6 @@
 use std::task::{Context, Poll};
 
+use crate::proto::{frame::FrameType, varint::BufExt as _};
 use bytes::Buf;
 
 #[cfg(feature = "tracing")]
@@ -34,6 +35,11 @@ impl<S, B> FrameStream<S, B> {
             decoder: FrameDecoder::default(),
             remaining_data: 0,
         }
+    }
+
+    pub(crate) fn with_max_frame_size(mut self, max: u64) -> Self {
+        self.decoder.max_frame_size = max;
+        self
     }
 
     /// Unwraps the Framed streamer and returns the underlying stream **without** data loss for
@@ -77,7 +83,7 @@ where
                     Poll::Ready(false) => continue,
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(true) => {
-                        if self.stream.buf_mut().has_remaining() {
+                        if self.stream.buf_mut().has_remaining() || self.decoder.skipping > 0 {
                             // Reached the end of receive stream, but there is still some data:
                             // The frame is incomplete.
                             Poll::Ready(Err(FrameStreamError::UnexpectedEnd))
@@ -159,6 +165,10 @@ where
     T: SendStream<B>,
     B: Buf,
 {
+    fn poll_stopped(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
+        self.stream.poll_stopped(cx)
+    }
+
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
         self.stream.poll_ready(cx)
     }
@@ -202,9 +212,20 @@ where
     }
 }
 
-#[derive(Default)]
 pub struct FrameDecoder {
     expected: Option<usize>,
+    skipping: u64,
+    max_frame_size: u64,
+}
+
+impl Default for FrameDecoder {
+    fn default() -> Self {
+        Self {
+            expected: None,
+            skipping: 0,
+            max_frame_size: 1024 * 1024,
+        }
+    }
 }
 
 impl FrameDecoder {
@@ -217,6 +238,57 @@ impl FrameDecoder {
         loop {
             if !src.has_remaining() {
                 return Ok(None);
+            }
+
+            if self.skipping > 0 {
+                let consumed = self.skipping.min(src.remaining() as u64) as usize;
+                src.advance(consumed);
+                self.skipping -= consumed as u64;
+                if self.skipping > 0 {
+                    return Ok(None);
+                }
+                continue;
+            }
+
+            // Inspect only the header. Unknown payloads must not accumulate in
+            // memory, and known buffered frames are bounded before payload reads.
+            let header = {
+                let mut cursor = src.cursor();
+                match FrameType::decode(&mut cursor) {
+                    Ok(kind) if kind != FrameType::WEBTRANSPORT_BI_STREAM => cursor
+                        .get_var()
+                        .ok()
+                        .map(|length| (kind, length, cursor.position())),
+                    _ => None,
+                }
+            };
+            if let Some((kind, length, header_size)) = header {
+                let known = matches!(
+                    kind,
+                    FrameType::DATA
+                        | FrameType::HEADERS
+                        | FrameType::SETTINGS
+                        | FrameType::CANCEL_PUSH
+                        | FrameType::PUSH_PROMISE
+                        | FrameType::GOAWAY
+                        | FrameType::MAX_PUSH_ID
+                        | FrameType::H2_PRIORITY
+                        | FrameType::H2_PING
+                        | FrameType::H2_WINDOW_UPDATE
+                        | FrameType::H2_CONTINUATION
+                );
+                if !known {
+                    src.advance(header_size);
+                    self.expected = None;
+                    self.skipping = length;
+                    continue;
+                }
+                if kind != FrameType::DATA && length > self.max_frame_size {
+                    return Err(FrameStreamError::Proto(FrameProtocolError::ExcessiveLoad));
+                }
+                if kind == FrameType::DATA && usize::try_from(length).is_err() {
+                    return Err(FrameStreamError::Proto(FrameProtocolError::ExcessiveLoad));
+                }
             }
 
             if let Some(min) = self.expected {
@@ -295,6 +367,7 @@ pub enum FrameStreamError {
 #[derive(Debug, PartialEq)]
 /// Protocol specific errors that can occur while decoding frames in a stream
 pub enum FrameProtocolError {
+    ExcessiveLoad,
     Malformed,
     ForbiddenFrame(u64), // Known (http2) frames that should generate an error
     InvalidFrameValue,
@@ -577,6 +650,64 @@ mod tests {
         assert_poll_matches!(
             |cx| to_bytes(stream.poll_data(cx)),
             Ok(Some(b)) if &*b == b"dy"
+        );
+    }
+
+    #[test]
+    fn unknown_payload_is_skipped_without_buffering() {
+        let mut decoder = FrameDecoder::default();
+        let mut bytes = BufList::from(bytes::Bytes::from_static(&[0x21, 6, 1, 2]));
+        assert_matches!(decoder.decode(&mut bytes), Ok(None));
+        assert_eq!(bytes.remaining(), 0);
+        assert_eq!(decoder.skipping, 4);
+        bytes.push(bytes::Bytes::from_static(&[3, 4, 5, 6, 0, 0]));
+        assert_matches!(
+            decoder.decode(&mut bytes),
+            Ok(Some(Frame::Data(PayloadLen(0))))
+        );
+        assert_eq!(bytes.remaining(), 0);
+    }
+
+    #[test]
+    fn huge_unknown_length_retains_only_a_counter() {
+        use crate::proto::varint::BufMutExt as _;
+        let mut header = bytes::BytesMut::new();
+        header.put_u8(0x21);
+        header.write_var(1 << 40);
+        let mut input = BufList::from(header.freeze());
+        let mut decoder = FrameDecoder::default();
+        assert_matches!(decoder.decode(&mut input), Ok(None));
+        assert_eq!(input.remaining(), 0);
+        assert_eq!(decoder.skipping, 1 << 40);
+        for _ in 0..16 {
+            input.push(bytes::Bytes::from_static(&[1; 32]));
+            assert_matches!(decoder.decode(&mut input), Ok(None));
+            assert_eq!(input.remaining(), 0);
+        }
+    }
+
+    #[test]
+    fn oversized_buffered_frame_is_rejected_before_payload() {
+        let mut decoder = FrameDecoder {
+            max_frame_size: 4,
+            ..Default::default()
+        };
+        let mut input = BufList::from(bytes::Bytes::from_static(&[1, 5]));
+        assert_matches!(
+            decoder.decode(&mut input),
+            Err(FrameStreamError::Proto(FrameProtocolError::ExcessiveLoad))
+        );
+        assert_eq!(input.remaining(), 2);
+    }
+
+    #[tokio::test]
+    async fn truncated_unknown_frame_is_not_a_clean_eof() {
+        let mut recv = FakeRecv::default();
+        recv.chunk(bytes::Bytes::from_static(&[0x21, 6, 1]));
+        let mut stream: FrameStream<_, ()> = FrameStream::new(BufRecvStream::new(recv));
+        assert_matches!(
+            poll_fn(|cx| stream.poll_next(cx)).await,
+            Err(FrameStreamError::UnexpectedEnd)
         );
     }
 
