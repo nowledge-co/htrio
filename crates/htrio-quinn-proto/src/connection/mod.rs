@@ -4134,6 +4134,8 @@ mod tests {
                 let (_, mut conn) = endpoint
                     .connect(now, config.clone(), remote, "localhost")
                     .unwrap();
+                // Payload handling follows authentication and packet-number deduplication.
+                conn.spaces[SpaceId::Data].dedup.insert(0);
                 let mut payload = Vec::new();
                 if immediate {
                     payload.write(frame::FrameType::IMMEDIATE_ACK);
