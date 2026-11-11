@@ -170,13 +170,13 @@ const MIN_AUTOMATIC_ACK_DELAY: Duration = Duration::from_millis(25);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Side;
+    use crate::{connection::spaces::PacketSpace, Instant, Side};
 
     #[test]
     fn received_ack_delay_bounds() {
         for micros in [999, 1_000, 16_383_999, 16_384_000, VarInt::MAX.into_inner()] {
             let mut state = AckFrequencyState::new(Duration::from_millis(25));
-            let mut pending = PendingAcks::new();
+            let mut pending = PacketSpace::new(Instant::now()).pending_acks;
             let frame = AckFrequency {
                 sequence: VarInt(0),
                 ack_eliciting_threshold: VarInt(1),

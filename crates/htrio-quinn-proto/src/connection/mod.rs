@@ -4148,10 +4148,10 @@ mod tests {
                 }
                 let header = if zero_rtt {
                     Header::Long {
-                        ty: packet::LongType::ZeroRtt,
+                        ty: LongType::ZeroRtt,
                         dst_cid: ConnectionId::new(&[]),
                         src_cid: ConnectionId::new(&[]),
-                        number: packet::PacketNumber::U8(0),
+                        number: PacketNumber::U8(0),
                         version: 1,
                     }
                 } else {
@@ -4159,7 +4159,7 @@ mod tests {
                         spin: false,
                         key_phase: false,
                         dst_cid: ConnectionId::new(&[]),
-                        number: packet::PacketNumber::U8(0),
+                        number: PacketNumber::U8(0),
                     }
                 };
                 let result = conn.process_payload(
