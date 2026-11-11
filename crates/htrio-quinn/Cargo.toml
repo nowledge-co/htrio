@@ -1,5 +1,5 @@
 [package]
-publish = false
+publish = ["crates-io"]
 edition = "2021"
 rust-version = "1.89"
 name = "htrio-quinn"
@@ -10,7 +10,7 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Versatile QUIC transport protocol implementation"
+description = "Quinn-based QUIC transport implementation maintained for htrio"
 readme = "README.md"
 keywords = ["quic"]
 categories = [

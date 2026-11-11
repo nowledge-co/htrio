@@ -1,5 +1,5 @@
 [package]
-publish = false
+publish = ["crates-io"]
 edition = "2021"
 rust-version = "1.89"
 name = "htrio-quinn-proto"
@@ -10,8 +10,8 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "State machine for the QUIC transport protocol"
-readme = false
+description = "Quinn-based QUIC protocol state machine maintained for htrio"
+readme = "UPSTREAM.md"
 keywords = ["quic"]
 categories = [
     "network-programming",

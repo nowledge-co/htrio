@@ -1,5 +1,5 @@
 [package]
-publish = false
+publish = ["crates-io"]
 edition = "2021"
 rust-version = "1.89"
 name = "htrio-h3-quinn"
@@ -11,7 +11,7 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "QUIC transport implementation based on Quinn."
+description = "Quinn transport adapter for htrio's HTTP/3 implementation"
 readme = "README.md"
 keywords = [
     "http3",

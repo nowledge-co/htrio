@@ -1,5 +1,10 @@
 # h3
 
+This is `htrio-h3`, the HTTP/3 protocol fork maintained in
+[htrio](https://github.com/nowledge-co/htrio). It requires Rust 1.89 or later.
+See [UPSTREAM.md](UPSTREAM.md) for its upstream revision and local changes.
+The upstream overview follows.
+
 An async HTTP/3 implementation.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)

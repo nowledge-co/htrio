@@ -1,5 +1,9 @@
 # h3-quinn
 
+This is `htrio-h3-quinn`, the adapter for `htrio-h3` and `htrio-quinn`, maintained
+in [htrio](https://github.com/nowledge-co/htrio). It requires Rust 1.89 or later.
+See [UPSTREAM.md](UPSTREAM.md) for provenance. The upstream overview follows.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../LICENSE)
 [![CI](https://github.com/hyperium/h3/workflows/CI/badge.svg)](https://github.com/hyperium/h3/actions?query=workflow%3ACI)
 [![Crates.io](https://img.shields.io/crates/v/h3-quinn.svg)](https://crates.io/crates/h3-quinn)

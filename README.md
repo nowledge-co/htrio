@@ -1,6 +1,8 @@
 # htrio
 
 [![CI](https://github.com/nowledge-co/htrio/actions/workflows/ci.yml/badge.svg)](https://github.com/nowledge-co/htrio/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/htrio.svg)](https://crates.io/crates/htrio)
+[![Documentation](https://docs.rs/htrio/badge.svg)](https://docs.rs/htrio)
 
 A native Rust HTTP client with a reqwest-style API, HTTP/1.0, HTTP/1.1,
 HTTP/2, and HTTP/3.
@@ -12,11 +14,11 @@ transports. Requires **Rust 1.89 or later**. Native targets only.
 
 ## Quick start
 
-Use a Git dependency while crates.io publication is not configured:
+Add htrio from crates.io:
 
 ```toml
 [dependencies]
-htrio = { git = "https://github.com/nowledge-co/htrio" }
+htrio = "0.1.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -70,7 +72,7 @@ Default features include `rustls`, `http2`, `http3`, `charset`, `system-proxy`,
 are opt-in. For a smaller build, disable defaults and select features explicitly:
 
 ```toml
-htrio = { git = "https://github.com/nowledge-co/htrio", default-features = false, features = ["rustls", "http2", "json", "stream"] }
+htrio = { version = "0.1.0", default-features = false, features = ["rustls", "http2", "json", "stream"] }
 ```
 
 ## HTTP/3 and Alt-Svc
@@ -217,7 +219,7 @@ Native TLS connections use HTTP/1 or HTTP/2.
 The API baseline is reqwest 0.13.4. Applications can retain their import name:
 
 ```toml
-reqwest = { package = "htrio", git = "https://github.com/nowledge-co/htrio", features = ["json", "stream", "query", "multipart"] }
+reqwest = { package = "htrio", version = "0.1.0", features = ["json", "stream", "query", "multipart"] }
 ```
 
 `rustls-tls` is an alias for `rustls`, retained for existing Mem configurations.
@@ -255,6 +257,8 @@ MSRV, native TLS, and feature-profile checks.
 The [local dependency crates](crates/README.md) are committed in this workspace.
 Quinn, its protocol engine, and its UDP adapter are sibling workspace crates. See [UPSTREAM.md](UPSTREAM.md) for pinned
 source revisions, licenses, and maintenance boundaries.
+
+See [PUBLISHING.md](PUBLISHING.md) for package verification and crates.io releases.
 
 ## License
 

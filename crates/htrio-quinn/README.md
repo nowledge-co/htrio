@@ -1,3 +1,10 @@
+# htrio-quinn
+
+This is the Quinn transport fork maintained in
+[htrio](https://github.com/nowledge-co/htrio). It requires Rust 1.89 or later,
+superseding the upstream minimum version below. See [UPSTREAM.md](UPSTREAM.md)
+for provenance and local changes. The upstream overview follows.
+
 <h1 align="center"><img width="500" src="https://raw.githubusercontent.com/quinn-rs/quinn/51a3cea225670757cb844a342428e4e1341d9f13/docs/thumbnail.svg" /></h1>
 
 [![Documentation](https://docs.rs/quinn/badge.svg)](https://docs.rs/quinn/)

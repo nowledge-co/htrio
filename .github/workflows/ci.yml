@@ -12,6 +12,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify crates.io packages
+        run: cargo publish --workspace --dry-run --locked -j 2
+
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 15

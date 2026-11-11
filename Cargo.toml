@@ -4,7 +4,7 @@ members = [".", "crates/htrio-h3", "crates/htrio-h3-quinn", "crates/htrio-h3-dat
 default-members = ["."]
 
 [package]
-publish = false
+publish = ["crates-io"]
 name = "htrio"
 version = "0.1.0"
 description = "A reqwest-compatible native HTTP/1, HTTP/2 and HTTP/3 client with Alt-Svc discovery"
@@ -20,10 +20,13 @@ autotests = true
 include = [
     "README.md",
     "UPSTREAM.md",
+    "PUBLISHING.md",
     "Cargo.toml",
     "LICENSE-APACHE",
     "LICENSE-MIT",
-    "src/**/*.rs"
+    "src/**/*.rs",
+    "examples/**/*.rs",
+    "tests/**"
 ]
 
 [package.metadata.docs.rs]

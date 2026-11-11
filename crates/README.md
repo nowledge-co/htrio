@@ -15,8 +15,11 @@ with htrio. No separate repository or submodule is required.
 
 Each crate retains its upstream license and revision metadata. The adapter uses
 owned receive streams and propagates peer upload cancellation. Path dependencies preserve type identity when htrio is consumed from another
-workspace. The root package and local dependencies are not configured for
-crates.io publication; release naming/versioning must be decided first.
+workspace. All seven workspace packages are publishable to crates.io. Cargo
+uses the version requirement instead of the sibling path in published packages,
+preserving the same dependency graph for registry consumers. Inherited dependency
+versions identify their upstream source baselines; these are separately maintained
+forks. See [the publishing guide](../PUBLISHING.md) for release order and checks.
 
 Keep protocol fixes narrow, add regression coverage, and document deviations
 from upstream in each crate's `UPSTREAM.md`.

@@ -1,5 +1,9 @@
 # H3 Datagram
 
+This is `htrio-h3-datagram`, the optional datagram extension for `htrio-h3`,
+maintained in [htrio](https://github.com/nowledge-co/htrio). It requires Rust 1.89
+or later. See [UPSTREAM.md](UPSTREAM.md) for provenance. The upstream overview follows.
+
 this crate provides an implementation of the [h3-datagram](https://datatracker.ietf.org/doc/html/rfc9297) spec that works with the h3 crate.
 
 # Status

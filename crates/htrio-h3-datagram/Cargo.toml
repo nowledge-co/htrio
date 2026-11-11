@@ -1,5 +1,5 @@
 [package]
-publish = false
+publish = ["crates-io"]
 edition = "2021"
 rust-version = "1.89"
 name = "htrio-h3-datagram"
@@ -10,7 +10,7 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "rfc9297 extension for the h3 crate"
+description = "RFC 9297 datagram extension for htrio's HTTP/3 implementation"
 readme = "readme.md"
 keywords = [
     "http3",
