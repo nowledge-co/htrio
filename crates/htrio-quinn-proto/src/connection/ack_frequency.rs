@@ -52,6 +52,7 @@ impl AckFrequencyState {
             Ord::min(candidate, Ord::max(rtt, MIN_AUTOMATIC_ACK_DELAY)),
             min_ack_delay,
         )
+        .min(MAX_ACK_DELAY - Duration::from_micros(1))
     }
 
     /// Returns the `max_ack_delay` for the purposes of calculating the PTO
@@ -131,8 +132,6 @@ impl AckFrequencyState {
             return Ok(false);
         }
 
-        self.last_ack_frequency_frame = Some(frame.sequence.into_inner());
-
         // Update max_ack_delay
         let max_ack_delay = Duration::from_micros(frame.request_max_ack_delay.into_inner());
         if max_ack_delay < TIMER_GRANULARITY {
@@ -140,6 +139,12 @@ impl AckFrequencyState {
                 "Requested Max Ack Delay in ACK_FREQUENCY frame is less than min_ack_delay",
             ));
         }
+        if max_ack_delay >= MAX_ACK_DELAY {
+            return Err(TransportError::PROTOCOL_VIOLATION(
+                "Requested Max Ack Delay in ACK_FREQUENCY frame is at least 2^14 milliseconds",
+            ));
+        }
+        self.last_ack_frequency_frame = Some(frame.sequence.into_inner());
         self.max_ack_delay = max_ack_delay;
 
         // Update the rest of the params
@@ -154,6 +159,9 @@ impl AckFrequencyState {
 /// extension and an explicit max ACK delay is not configured.
 const MAX_RTT_ERROR: f32 = 0.2;
 
+// ACK Frequency draft-14, section 4, retains QUIC's exclusive max_ack_delay bound.
+const MAX_ACK_DELAY: Duration = Duration::from_millis(1 << 14);
+
 /// Minimum value to request the peer set max ACK delay to when the peer supports the ACK frequency
 /// extension and an explicit max ACK delay is not configured.
 // Keep in sync with `AckFrequencyConfig::max_ack_delay` documentation
@@ -163,6 +171,52 @@ const MIN_AUTOMATIC_ACK_DELAY: Duration = Duration::from_millis(25);
 mod tests {
     use super::*;
     use crate::Side;
+
+    #[test]
+    fn received_ack_delay_bounds() {
+        for micros in [999, 1_000, 16_383_999, 16_384_000, VarInt::MAX.into_inner()] {
+            let mut state = AckFrequencyState::new(Duration::from_millis(25));
+            let mut pending = PendingAcks::new();
+            let frame = AckFrequency {
+                sequence: VarInt(0),
+                ack_eliciting_threshold: VarInt(1),
+                request_max_ack_delay: VarInt::from_u64(micros).unwrap(),
+                reordering_threshold: VarInt(2),
+            };
+            let result = state.ack_frequency_received(&frame, &mut pending);
+            if (1_000..16_384_000).contains(&micros) {
+                assert!(result.unwrap(), "{micros}");
+                assert_eq!(state.max_ack_delay, Duration::from_micros(micros));
+            } else {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    crate::TransportErrorCode::PROTOCOL_VIOLATION
+                );
+                assert_eq!(state.max_ack_delay, Duration::from_millis(25));
+                assert_eq!(state.last_ack_frequency_frame, None);
+            }
+        }
+    }
+
+    #[test]
+    fn requested_ack_delay_stays_within_wire_bounds() {
+        let state = AckFrequencyState::new(Duration::from_millis(16_383));
+        let config = AckFrequencyConfig {
+            max_ack_delay: Some(Duration::from_secs(60)),
+            ..AckFrequencyConfig::default()
+        };
+        let params = TransportParameters {
+            min_ack_delay: Some(16_383_000u32.into()),
+            max_ack_delay: 16_383u32.into(),
+            ..TransportParameters::default()
+        };
+        let mut encoded = Vec::new();
+        params.write(&mut encoded);
+        let params = TransportParameters::read(Side::Client, &mut encoded.as_slice()).unwrap();
+        let delay = state.candidate_max_ack_delay(Duration::from_secs(30), &config, &params);
+        assert_eq!(delay, Duration::from_micros(16_383_999));
+        assert!(delay >= Duration::from_micros(16_383_000));
+    }
 
     #[test]
     fn peer_min_ack_delay_can_exceed_rtt() {

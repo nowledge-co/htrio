@@ -8,9 +8,9 @@ use rustls::crypto::ring::default_provider;
 use std::{
     convert::TryInto,
     future::Future,
-    io,
+    io::{self, IoSliceMut},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
-    pin::pin,
+    pin::{pin, Pin},
     str,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -37,7 +37,10 @@ use tracing::{error_span, info};
 use tracing_futures::Instrument as _;
 use tracing_subscriber::EnvFilter;
 
-use super::{ClientConfig, Endpoint, EndpointConfig, RecvStream, SendStream, TransportConfig};
+use super::{
+    AsyncUdpSocket, ClientConfig, Endpoint, EndpointConfig, RecvStream, SendStream,
+    TransportConfig, UdpPoller,
+};
 
 #[test]
 fn handshake_timeout() {
@@ -679,6 +682,100 @@ fn rt_basic() -> Runtime {
 
 fn rt_threaded() -> Runtime {
     Builder::new_multi_thread().enable_all().build().unwrap()
+}
+
+#[derive(Debug)]
+struct ReceiveCapacitySocket {
+    segments: usize,
+    capacity: AtomicUsize,
+    observed: tokio::sync::Notify,
+}
+
+impl ReceiveCapacitySocket {
+    fn new(segments: usize) -> Arc<Self> {
+        Arc::new(Self {
+            segments,
+            capacity: AtomicUsize::new(0),
+            observed: tokio::sync::Notify::new(),
+        })
+    }
+
+    async fn capacity(&self) -> usize {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let observed = self.observed.notified();
+                let capacity = self.capacity.load(Ordering::Relaxed);
+                if capacity != 0 {
+                    return capacity;
+                }
+                observed.await;
+            }
+        })
+        .await
+        .expect("endpoint did not poll its receive socket")
+    }
+}
+
+impl AsyncUdpSocket for ReceiveCapacitySocket {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        Box::pin(ReceiveCapacityPoller)
+    }
+
+    fn try_send(&self, _: &udp::Transmit<'_>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn poll_recv(
+        &self,
+        _: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+        _: &mut [udp::RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        self.capacity.store(bufs[0].len(), Ordering::Relaxed);
+        self.observed.notify_one();
+        Poll::Pending
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 4433))
+    }
+
+    fn max_receive_segments(&self) -> usize {
+        self.segments
+    }
+}
+
+#[derive(Debug)]
+struct ReceiveCapacityPoller;
+
+impl UdpPoller for ReceiveCapacityPoller {
+    fn poll_writable(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn rebind_grows_receive_capacity_and_preserves_previous_socket_capacity() {
+    let socket = ReceiveCapacitySocket::new(1);
+    let config = EndpointConfig::default();
+    let payload_size = config.get_max_udp_payload_size() as usize;
+    let endpoint =
+        Endpoint::new_with_abstract_socket(config, None, socket.clone(), Arc::new(TokioRuntime))
+            .unwrap();
+    assert_eq!(socket.capacity().await, payload_size);
+
+    let gro = ReceiveCapacitySocket::new(64);
+    endpoint.rebind_abstract(gro.clone()).unwrap();
+    assert_eq!(gro.capacity().await, payload_size * 64);
+
+    gro.capacity.store(0, Ordering::Relaxed);
+    let smaller = ReceiveCapacitySocket::new(2);
+    endpoint.rebind_abstract(smaller.clone()).unwrap();
+    assert_eq!(smaller.capacity().await, payload_size * 64);
+    // No connection traffic has arrived on the replacement socket, so GRO reads
+    // from the previous socket must still have enough space.
+    assert_eq!(gro.capacity().await, payload_size * 64);
+    endpoint.close(0u32.into(), b"done");
 }
 
 #[tokio::test]

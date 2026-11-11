@@ -513,6 +513,7 @@ impl AckFrequencyConfig {
     ///
     /// The effective `max_ack_delay` will be clamped to be at least the peer's `min_ack_delay`
     /// transport parameter, and at most the greater of the current path RTT or 25ms.
+    /// It is also capped below the protocol's exclusive 2^14 millisecond limit.
     ///
     /// Defaults to `None`, in which case the peer's original `max_ack_delay` will be used, as
     /// obtained from its transport parameters.

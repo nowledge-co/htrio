@@ -2783,7 +2783,10 @@ impl Connection {
             let _guard = span.as_ref().map(|x| x.enter());
             if packet.header.is_0rtt() {
                 match frame {
-                    Frame::Crypto(_) | Frame::Close(Close::Application(_)) => {
+                    Frame::Crypto(_)
+                    | Frame::Close(Close::Application(_))
+                    | Frame::AckFrequency(_)
+                    | Frame::ImmediateAck => {
                         return Err(TransportError::PROTOCOL_VIOLATION(
                             "illegal frame type in 0-RTT",
                         ));
@@ -4114,6 +4117,73 @@ fn negotiate_max_idle_timeout(x: Option<VarInt>, y: Option<VarInt>) -> Option<Du
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "rustls-ring")]
+    #[test]
+    fn ack_frequency_frames_require_one_rtt() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert.cert.der().clone()).unwrap();
+        let config = crate::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+        let remote = "[::1]:4433".parse().unwrap();
+        for immediate in [false, true] {
+            for zero_rtt in [false, true] {
+                let now = Instant::now();
+                let mut endpoint =
+                    crate::Endpoint::new(Arc::new(EndpointConfig::default()), None, true, None);
+                let (_, mut conn) = endpoint
+                    .connect(now, config.clone(), remote, "localhost")
+                    .unwrap();
+                let mut payload = Vec::new();
+                if immediate {
+                    payload.write(frame::FrameType::IMMEDIATE_ACK);
+                } else {
+                    frame::AckFrequency {
+                        sequence: VarInt(0),
+                        ack_eliciting_threshold: VarInt(1),
+                        request_max_ack_delay: VarInt(25_000),
+                        reordering_threshold: VarInt(2),
+                    }
+                    .encode(&mut payload);
+                }
+                let header = if zero_rtt {
+                    Header::Long {
+                        ty: packet::LongType::ZeroRtt,
+                        dst_cid: ConnectionId::new(&[]),
+                        src_cid: ConnectionId::new(&[]),
+                        number: packet::PacketNumber::U8(0),
+                        version: 1,
+                    }
+                } else {
+                    Header::Short {
+                        spin: false,
+                        key_phase: false,
+                        dst_cid: ConnectionId::new(&[]),
+                        number: packet::PacketNumber::U8(0),
+                    }
+                };
+                let result = conn.process_payload(
+                    now,
+                    remote,
+                    0,
+                    Packet {
+                        header,
+                        header_data: Bytes::new(),
+                        payload: payload.as_slice().into(),
+                    },
+                );
+                if zero_rtt {
+                    assert_eq!(
+                        result.unwrap_err().code,
+                        TransportErrorCode::PROTOCOL_VIOLATION
+                    );
+                    assert_eq!(conn.ack_frequency.max_ack_delay, Duration::from_millis(25));
+                } else {
+                    result.unwrap();
+                }
+            }
+        }
+    }
 
     #[cfg(feature = "rustls-ring")]
     #[test]

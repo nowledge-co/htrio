@@ -20,3 +20,6 @@ Git/path consumers. Changes are maintained and pushed with htrio.
 
 - Expose connection handshake state and stream priority updates for HTTP/3
   early-data policy and request reprioritization.
+- Grow receive buffers when rebinding to a socket with a larger GRO capacity,
+  retaining the largest allocation across rebinds so the previous socket can
+  continue delivering complete GRO trains.
