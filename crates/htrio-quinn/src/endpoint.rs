@@ -252,6 +252,11 @@ impl Endpoint {
     pub fn rebind_abstract(&self, socket: Arc<dyn AsyncUdpSocket>) -> io::Result<()> {
         let addr = socket.local_addr()?;
         let mut inner = self.inner.state.lock().unwrap();
+        let recv_buf_size = RecvState::buffer_size(socket.max_receive_segments(), &inner.inner);
+        if recv_buf_size > inner.recv_state.recv_buf.len() {
+            inner.recv_state.recv_buf = vec![0; recv_buf_size].into_boxed_slice();
+        }
+        // Retain larger buffers while the previous socket can still deliver GRO trains.
         inner.prev_socket = Some(mem::replace(&mut inner.socket, socket));
         inner.ipv6 = addr.is_ipv6();
 
@@ -745,17 +750,18 @@ struct RecvState {
 }
 
 impl RecvState {
+    fn buffer_size(max_receive_segments: usize, endpoint: &proto::Endpoint) -> usize {
+        endpoint.config().get_max_udp_payload_size().min(64 * 1024) as usize
+            * max_receive_segments
+            * BATCH_SIZE
+    }
+
     fn new(
         sender: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
         max_receive_segments: usize,
         endpoint: &proto::Endpoint,
     ) -> Self {
-        let recv_buf = vec![
-            0;
-            endpoint.config().get_max_udp_payload_size().min(64 * 1024) as usize
-                * max_receive_segments
-                * BATCH_SIZE
-        ];
+        let recv_buf = vec![0; Self::buffer_size(max_receive_segments, endpoint)];
         Self {
             connections: ConnectionSet {
                 senders: FxHashMap::default(),
