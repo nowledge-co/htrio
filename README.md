@@ -254,6 +254,16 @@ Tests use local HTTPS/QUIC servers and SOCKS5 relays. External service tests are
 explicitly ignored. [CI](.github/workflows/ci.yml) defines Linux, macOS, Windows,
 MSRV, native TLS, and feature-profile checks.
 
+Measure Alt-Svc candidate lookups with the production cache implementation:
+
+```sh
+cargo bench --locked -j 2 --no-default-features --features http3 --bench alt_svc_lookup -- --iterations 100000 --samples 9
+```
+
+The benchmark emits JSON records for empty, single-origin, and populated caches,
+including four-thread shared-cache cases. Timings are aggregate wall time per
+lookup; they exclude cache population, thread creation, and HTTP network I/O.
+
 The [local dependency crates](crates/README.md) are committed in this workspace.
 Quinn, its protocol engine, and its UDP adapter are sibling workspace crates. See [UPSTREAM.md](UPSTREAM.md) for pinned
 source revisions, licenses, and maintenance boundaries.
