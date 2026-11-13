@@ -72,8 +72,8 @@ jobs:
         run: cargo test --locked -j 2 --no-default-features --features rustls,http2,json,query,form,cookies,multipart,stream,blocking -- --test-threads=2
       - name: Optional QUIC tracing
         run: cargo check --locked -j 2 --features http3-qlog
-      - name: Compile cache benchmark
-        run: cargo check --locked -j 2 --no-default-features --features http3 --bench alt_svc_lookup
+      - name: Compile performance benchmarks
+        run: cargo check --locked -j 2 --no-default-features --features http3 --benches
       - name: Documentation
         env:
           RUSTDOCFLAGS: -D warnings

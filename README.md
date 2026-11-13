@@ -264,6 +264,18 @@ The benchmark emits JSON records for empty, single-origin, and populated caches,
 including four-thread shared-cache cases. Timings are aggregate wall time per
 lookup; they exclude cache population, thread creation, and HTTP network I/O.
 
+Measure HTTP/3 connection preparation as the pool grows:
+
+```sh
+cargo bench --locked -j 2 --no-default-features --features http3 --bench h3_pool_miss -- --iterations 10000 --samples 9
+```
+
+The pool contains real loopback QUIC connections. Misses use a local resolver
+that immediately returns an error, isolating preparation from network waits.
+Enabled coalescing and existing-connection hits provide controls. JSON records
+report wall time per `preconnect` call, excluding pool population and handshakes;
+these are not HTTP request latency or throughput measurements.
+
 The [local dependency crates](crates/README.md) are committed in this workspace.
 Quinn, its protocol engine, and its UDP adapter are sibling workspace crates. See [UPSTREAM.md](UPSTREAM.md) for pinned
 source revisions, licenses, and maintenance boundaries.
