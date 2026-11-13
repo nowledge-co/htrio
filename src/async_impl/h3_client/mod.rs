@@ -113,11 +113,11 @@ impl H3Client {
             }
             self.pool.remove(&key);
         }
-        let may_coalesce = {
+        let may_coalesce = !requires_ech && self.connector.coalescing_enabled() && {
             let health = self.health.lock().unwrap();
             health.coalescing_rejected.len() < 256 && !health.coalescing_rejected.contains(&key)
         };
-        if may_coalesce && !requires_ech {
+        if may_coalesce {
             for (previous, client) in self.pool.coalescing_candidates(&key) {
                 if self.connector.can_coalesce(origin, &key.2, &client.info) {
                     if let Some(client) = self.pool.alias(key.clone(), &previous) {

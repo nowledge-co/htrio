@@ -712,17 +712,19 @@ async fn tcp_connection_races_a_blackholed_quic_handshake() {
 
 #[tokio::test]
 async fn cross_origin_coalescing_is_opt_in_and_rechecks_certificate_authority() {
-    for enabled in [false, true] {
+    for setting in [None, Some(false), Some(true)] {
+        let enabled = setting.unwrap_or(false);
         let server = LocalServer::with_names(&["origin.test", "second.test"], advertise).await;
         let cache = Arc::new(AltSvcCache::new());
-        let client = server
+        let mut builder = server
             .client_builder()
             .resolve("second.test", server.addr)
             .resolve("uncovered.test", server.addr)
-            .http3_coalescing(enabled)
-            .alt_svc_cache(cache.clone())
-            .build()
-            .unwrap();
+            .alt_svc_cache(cache.clone());
+        if let Some(enabled) = setting {
+            builder = builder.http3_coalescing(enabled);
+        }
+        let client = builder.build().unwrap();
         let second = format!("https://second.test:{}/", server.addr.port());
         for url in [server.url("/seed"), format!("{second}seed")] {
             client.get(url).send().await.unwrap().bytes().await.unwrap();
