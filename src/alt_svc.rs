@@ -232,12 +232,18 @@ impl AltSvcCache {
             return Vec::new();
         };
         let mut state = self.inner.lock().unwrap();
-        prune(&mut state, Instant::now());
-        state
-            .origins
-            .get(&key)
-            .map(|entry| entry.alternatives.clone())
-            .unwrap_or_default()
+        let Some(entry) = state.origins.get_mut(&key) else {
+            return Vec::new();
+        };
+        // Route selection only needs this origin. Writes and cache observers
+        // reclaim expired entries across the full, bounded cache.
+        let now = Instant::now();
+        entry.alternatives.retain(|alt| alt.expires > now);
+        if entry.alternatives.is_empty() {
+            state.origins.remove(&key);
+            return Vec::new();
+        }
+        entry.alternatives.clone()
     }
 
     #[cfg(test)]
@@ -549,6 +555,82 @@ mod tests {
             &headers,
             Duration::ZERO,
         );
+    }
+
+    fn expire(cache: &AltSvcCache, origin: &Uri, index: usize) {
+        cache
+            .inner
+            .lock()
+            .unwrap()
+            .origins
+            .get_mut(&origin_key(origin).unwrap())
+            .unwrap()
+            .alternatives[index]
+            .expires = Instant::now();
+    }
+
+    #[test]
+    fn candidate_lookup_expires_alternatives_and_preserves_backoff() {
+        let cache = AltSvcCache::new();
+        let origin: Uri = "https://example.test/".parse().unwrap();
+        learn(
+            &cache,
+            &origin.to_string(),
+            "h3=\":443\";ma=60, h3=\":8443\";ma=60;persist=1",
+        );
+        let alternatives = cache.candidates(&origin);
+        cache.mark_broken(&origin, &alternatives[1]);
+        expire(&cache, &origin, 0);
+
+        let live = cache.candidates(&"https://EXAMPLE.test:443/path".parse().unwrap());
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].authority, "example.test:8443");
+        assert!(live[0].persist);
+        assert!(live[0].broken_until.unwrap() > Instant::now());
+
+        expire(&cache, &origin, 0);
+        assert!(cache.candidates(&origin).is_empty());
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn insertion_reclaims_unrelated_expired_origins_before_eviction() {
+        let cache = AltSvcCache::with_capacity(2);
+        let fresh: Uri = "https://fresh.test/".parse().unwrap();
+        let expired: Uri = "https://expired.test/".parse().unwrap();
+        learn(&cache, &fresh.to_string(), "h3=\":443\"");
+        learn(&cache, &expired.to_string(), "h3=\":443\"");
+        expire(&cache, &expired, 0);
+        assert_eq!(cache.candidates(&fresh).len(), 1);
+
+        let added: Uri = "https://added.test/".parse().unwrap();
+        learn(&cache, &added.to_string(), "h3=\":443\"");
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.candidates(&fresh).len(), 1);
+        assert_eq!(cache.candidates(&added).len(), 1);
+        assert!(cache.candidates(&expired).is_empty());
+    }
+
+    #[test]
+    fn observers_prune_expired_origins_after_lookup_misses() {
+        for snapshot_first in [false, true] {
+            let cache = AltSvcCache::with_capacity(2);
+            learn(&cache, "https://fresh.test/", "h3=\":443\"");
+            let expired: Uri = "https://expired.test/".parse().unwrap();
+            learn(&cache, &expired.to_string(), "h3=\":443\"");
+            expire(&cache, &expired, 0);
+            assert!(cache
+                .candidates(&"https://missing.test/".parse().unwrap())
+                .is_empty());
+
+            if snapshot_first {
+                assert_eq!(cache.snapshot().len(), 1);
+            }
+            assert_eq!(cache.len(), 1);
+            let records = cache.snapshot();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].origin, "https://fresh.test:443");
+        }
     }
 
     #[test]

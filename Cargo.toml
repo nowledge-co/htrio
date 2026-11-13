@@ -26,6 +26,7 @@ include = [
     "LICENSE-MIT",
     "src/**/*.rs",
     "examples/**/*.rs",
+    "benches/**/*.rs",
     "tests/**"
 ]
 
@@ -187,6 +188,11 @@ tower = { version = "0.5.2", default-features = false, features = ["limit"] }
 num_cpus = "1.0"
 libc = "0"
 rcgen = "0.14"
+
+[[bench]]
+name = "alt_svc_lookup"
+harness = false
+required-features = ["http3"]
 
 [[example]]
 name = "blocking"
