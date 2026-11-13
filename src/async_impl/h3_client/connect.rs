@@ -233,10 +233,6 @@ impl H3Connector {
             .cloned()
     }
 
-    pub(super) fn coalescing_enabled(&self) -> bool {
-        self.client_config.coalescing
-    }
-
     pub(crate) fn can_coalesce(
         &self,
         origin: &Uri,
@@ -246,7 +242,7 @@ impl H3Connector {
         let connection = &info.connection;
         if connection.is_handshaking()
             || info.uses_ech()
-            || !self.coalescing_enabled()
+            || !self.client_config.coalescing
             || self.tls.client_auth_cert_resolver.has_certs()
             || self
                 .service(origin, destination)

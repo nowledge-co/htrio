@@ -275,6 +275,7 @@ that immediately returns an error, isolating preparation from network waits.
 Enabled coalescing and existing-connection hits provide controls. JSON records
 report wall time per `preconnect` call, excluding pool population and handshakes;
 these are not HTTP request latency or throughput measurements.
+Use `--case pooled_hit` (or another emitted case name) to measure one scenario.
 
 The [local dependency crates](crates/README.md) are committed in this workspace.
 Quinn, its protocol engine, and its UDP adapter are sibling workspace crates. See [UPSTREAM.md](UPSTREAM.md) for pinned

@@ -101,6 +101,7 @@ async fn prepare(client: &Client, origin: &Url, hit: bool, iterations: usize) {
 fn main() {
     let mut iterations = 10_000;
     let mut samples = 9;
+    let mut selected_case = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -112,6 +113,7 @@ fn main() {
                     .unwrap()
             }
             "--samples" => samples = args.next().expect("missing sample count").parse().unwrap(),
+            "--case" => selected_case = Some(args.next().expect("missing case name")),
             "--bench" => {}
             _ => panic!("unknown argument: {arg}"),
         }
@@ -127,6 +129,7 @@ fn main() {
             .collect();
         let names: Vec<_> = names.iter().map(String::as_str).collect();
         let server = LocalServer::with_names(&names, |_, _| http::Response::default()).await;
+        let mut matched = false;
         for (name, origins, coalescing, hit) in [
             ("empty_miss", 0, false, false),
             ("single_miss", 1, false, false),
@@ -136,6 +139,13 @@ fn main() {
             ("pooled_hit", 256, false, true),
             ("enabled_pooled_hit", 256, true, true),
         ] {
+            if selected_case
+                .as_ref()
+                .is_some_and(|selected| selected != name)
+            {
+                continue;
+            }
+            matched = true;
             Case {
                 name,
                 origins,
@@ -146,5 +156,6 @@ fn main() {
             .await;
             tokio::task::yield_now().await;
         }
+        assert!(matched, "unknown benchmark case: {selected_case:?}");
     });
 }
