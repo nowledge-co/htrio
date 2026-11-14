@@ -194,6 +194,11 @@ name = "alt_svc_lookup"
 harness = false
 required-features = ["http3"]
 
+[[bench]]
+name = "h3_pool_miss"
+harness = false
+required-features = ["http3"]
+
 [[example]]
 name = "blocking"
 path = "examples/blocking.rs"

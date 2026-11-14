@@ -113,18 +113,8 @@ impl H3Client {
             }
             self.pool.remove(&key);
         }
-        let may_coalesce = {
-            let health = self.health.lock().unwrap();
-            health.coalescing_rejected.len() < 256 && !health.coalescing_rejected.contains(&key)
-        };
-        if may_coalesce && !requires_ech {
-            for (previous, client) in self.pool.coalescing_candidates(&key) {
-                if self.connector.can_coalesce(origin, &key.2, &client.info) {
-                    if let Some(client) = self.pool.alias(key.clone(), &previous) {
-                        return Ok(client);
-                    }
-                }
-            }
+        if let Some(client) = self.try_coalesce(origin, &key, requires_ech) {
+            return Ok(client);
         }
         let lock = match self.pool.connecting(&key) {
             pool::Connecting::InProgress(waiter) => {
@@ -169,6 +159,31 @@ impl H3Client {
             started.elapsed(),
             self.connector.tls_info(),
         ))
+    }
+
+    fn try_coalesce(
+        &self,
+        origin: &Uri,
+        key: &pool::Key,
+        requires_ech: bool,
+    ) -> Option<PoolClient> {
+        if requires_ech || !self.connector.coalescing_enabled() {
+            return None;
+        }
+        let may_coalesce = {
+            let health = self.health.lock().unwrap();
+            health.coalescing_rejected.len() < 256 && !health.coalescing_rejected.contains(key)
+        };
+        if may_coalesce {
+            for (previous, client) in self.pool.coalescing_candidates(key) {
+                if self.connector.can_coalesce(origin, &key.2, &client.info) {
+                    if let Some(client) = self.pool.alias(key.clone(), &previous) {
+                        return Some(client);
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub(crate) async fn discover(
