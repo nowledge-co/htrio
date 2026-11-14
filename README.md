@@ -94,7 +94,9 @@ origin. Each redirect hop makes its own transport decision.
   state and future endpoints while active streams retain their transport.
 - After dispatch, ambiguous transport failures do not trigger TCP replay.
   Safe protocol NACKs follow the retry policy. A 421 invalidates the alternative;
-  the origin is retried only when the body can be cloned.
+  the origin is retried only when the body can be cloned and the configured
+  retry policy permits it. `retry(retry::never())` returns the 421 without
+  replay while still evicting the rejected alternative.
 - The process-local cache holds 256 origins and eight alternatives per origin
   by default. It handles header lists, `ma`, `persist`, `clear`, freshness/age,
   expiry, and broken-endpoint backoff. Applications detecting network changes

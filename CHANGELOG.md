@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Apply the configured retry policy to automatic HTTP/3 421 recovery, including
+  disabled retries, host scopes, classifiers, request limits and budgets.
+  Rejected alternatives are still evicted when replay is refused.
+
 ## 0.2.0 - 2026-11-14
 
 ### Performance

@@ -165,6 +165,132 @@ fn misdirected(request: Request<Bytes>, port: u16) -> Response<Bytes> {
     }
 }
 
+async fn misdirected_client(
+    retry: htrio::retry::Builder,
+) -> (LocalServer, Arc<AltSvcCache>, htrio::Client) {
+    let server = LocalServer::new(misdirected).await;
+    let cache = Arc::new(AltSvcCache::new());
+    let client = server
+        .client_builder()
+        .alt_svc_cache(cache.clone())
+        .retry(retry)
+        .build()
+        .unwrap();
+    client
+        .get(server.url("/seed"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    client.preconnect(server.url("/echo")).await.unwrap();
+    (server, cache, client)
+}
+
+async fn assert_misdirected_not_replayed(retry: htrio::retry::Builder) {
+    let (server, cache, client) = misdirected_client(retry).await;
+    let response = client
+        .post(server.url("/echo"))
+        .body("one dispatch")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
+    assert_eq!(response.version(), Version::HTTP_3);
+    assert!(cache.is_empty());
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].body(), "one dispatch");
+
+    // Eviction applies to future independent requests even without replay.
+    let next = client
+        .post(server.url("/echo"))
+        .body("next operation")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(next.version(), Version::HTTP_2);
+    assert_eq!(next.text().await.unwrap(), "next operation");
+    assert_eq!(server.requests().len(), 3);
+}
+
+#[tokio::test]
+async fn misdirected_never_policy_returns_421_without_replay() {
+    assert_misdirected_not_replayed(htrio::retry::never()).await;
+}
+
+fn retry_misdirected(host: &'static str) -> htrio::retry::Builder {
+    htrio::retry::for_host(host).classify_fn(|attempt| {
+        if attempt.status() == Some(StatusCode::MISDIRECTED_REQUEST) {
+            attempt.retryable()
+        } else {
+            attempt.success()
+        }
+    })
+}
+
+#[tokio::test]
+async fn misdirected_zero_retry_limit_returns_421_without_replay() {
+    assert_misdirected_not_replayed(retry_misdirected("origin.test").max_retries_per_request(0))
+        .await;
+}
+
+#[tokio::test]
+async fn misdirected_classifier_refusal_returns_421_without_replay() {
+    assert_misdirected_not_replayed(
+        htrio::retry::for_host("origin.test").classify_fn(|attempt| attempt.success()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn misdirected_out_of_scope_returns_421_without_replay() {
+    assert_misdirected_not_replayed(retry_misdirected("different.test")).await;
+}
+
+#[tokio::test]
+async fn misdirected_origin_retry_counts_towards_the_request_limit() {
+    let server = LocalServer::new(|request, port| {
+        if request.uri().path() == "/seed" {
+            advertise(request, port)
+        } else {
+            Response::builder()
+                .status(StatusCode::MISDIRECTED_REQUEST)
+                .body(Bytes::new())
+                .unwrap()
+        }
+    })
+    .await;
+    let client = server
+        .client_builder()
+        .retry(retry_misdirected("origin.test").max_retries_per_request(1))
+        .build()
+        .unwrap();
+    client
+        .get(server.url("/seed"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    client.preconnect(server.url("/echo")).await.unwrap();
+    let response = client
+        .post(server.url("/echo"))
+        .body("bounded recovery")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
+    assert_eq!(response.version(), Version::HTTP_2);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1].version(), Version::HTTP_3);
+    assert_eq!(requests[2].version(), Version::HTTP_2);
+    assert_eq!(requests[1].body(), requests[2].body());
+}
+
 #[tokio::test]
 async fn misdirected_replayable_post_evicts_alternative_and_retries_origin_once() {
     let server = LocalServer::new(misdirected).await;
@@ -172,7 +298,6 @@ async fn misdirected_replayable_post_evicts_alternative_and_retries_origin_once(
     let client = server
         .client_builder()
         .alt_svc_cache(cache.clone())
-        .retry(htrio::retry::never())
         .build()
         .unwrap();
     client
@@ -190,6 +315,14 @@ async fn misdirected_replayable_post_evicts_alternative_and_retries_origin_once(
         .await
         .unwrap();
     assert_eq!(response.version(), Version::HTTP_2);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<htrio::http3::TransportInfo>()
+            .unwrap()
+            .selection,
+        htrio::http3::TransportSelection::MisdirectedFallback
+    );
     assert_eq!(response.text().await.unwrap(), "replayable");
     assert!(cache.is_empty());
     let requests = server.requests();

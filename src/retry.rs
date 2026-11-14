@@ -84,7 +84,7 @@ where
 /// Create a retry policy that will never retry any request.
 ///
 /// This is useful for disabling the `Client`s default behavior of retrying
-/// protocol nacks.
+/// protocol nacks, including automatic HTTP/3 recovery after a 421 response.
 pub fn never() -> Builder {
     scoped(|_| false).no_budget()
 }
@@ -220,6 +220,14 @@ impl Builder {
 
 type Req = http::Request<crate::async_impl::body::Body>;
 
+// Only the transport can identify an automatic HTTP/3 route that returned 421.
+// Carry its original start time into a policy-authorized origin retry.
+#[cfg(feature = "http3")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MisdirectedRetry {
+    pub(crate) started: std::time::Instant,
+}
+
 impl<B> tower::retry::Policy<Req, http::Response<B>, crate::Error> for Policy {
     // TODO? backoff futures...
     type Future = std::future::Ready<()>;
@@ -241,6 +249,12 @@ impl<B> tower::retry::Policy<Req, http::Response<B>, crate::Error> for Policy {
                 log::trace!("could retry!");
                 if self.budget.as_ref().map(|b| b.withdraw()).unwrap_or(true) {
                     self.retry_cnt += 1;
+                    #[cfg(feature = "http3")]
+                    if let Some(retry) = result.as_ref().ok().and_then(|response| {
+                        response.extensions().get::<MisdirectedRetry>().copied()
+                    }) {
+                        req.extensions_mut().insert(retry);
+                    }
                     Some(std::future::ready(()))
                 } else {
                     log::debug!("retryable but could not withdraw from budget");
@@ -251,7 +265,7 @@ impl<B> tower::retry::Policy<Req, http::Response<B>, crate::Error> for Policy {
     }
 
     fn clone_request(&mut self, req: &Req) -> Option<Req> {
-        if self.retry_cnt > 0 && !self.scope.applies_to(req) {
+        if !self.scope.applies_to(req) {
             return None;
         }
         if self.retry_cnt >= self.max_retries_per_request {
@@ -453,6 +467,16 @@ mod classify {
             match self {
                 Self::Never => Action::Success,
                 Self::ProtocolNacks => {
+                    #[cfg(feature = "http3")]
+                    if res.as_ref().is_ok_and(|response| {
+                        response.status() == http::StatusCode::MISDIRECTED_REQUEST
+                            && response
+                                .extensions()
+                                .get::<super::MisdirectedRetry>()
+                                .is_some()
+                    }) {
+                        return Action::Retryable;
+                    }
                     if req_rep.is_protocol_nack() {
                         Action::Retryable
                     } else {

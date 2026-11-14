@@ -47,6 +47,41 @@ async fn retries_apply_in_scope() {
     assert_eq!(resp.status(), 200);
 }
 
+#[tokio::test]
+async fn retries_do_not_apply_outside_scope() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    let server = server::http(move |_request| {
+        let seen = seen.clone();
+        async move {
+            seen.fetch_add(1, Ordering::Relaxed);
+            http::Response::builder()
+                .status(http::StatusCode::SERVICE_UNAVAILABLE)
+                .body(Default::default())
+                .unwrap()
+        }
+    });
+    let policy = htrio::retry::for_host("different.test").classify_fn(|attempt| {
+        if attempt.status() == Some(http::StatusCode::SERVICE_UNAVAILABLE) {
+            attempt.retryable()
+        } else {
+            attempt.success()
+        }
+    });
+    let response = htrio::Client::builder()
+        .no_proxy()
+        .retry(policy)
+        .build()
+        .unwrap()
+        .post(format!("http://{}", server.addr()))
+        .body("one attempt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(count.load(Ordering::Relaxed), 1);
+}
+
 #[cfg(feature = "http2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn default_retries_have_a_limit() {
