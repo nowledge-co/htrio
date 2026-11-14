@@ -2,7 +2,7 @@
 //!
 //! Preparing QUIC must not consume the body: failures before dispatch may use
 //! the origin route, preserving the selected proxy. After dispatch, only the
-//! retry policy may authorize replay, except for a 421 with a cloneable body.
+//! retry policy may authorize replay, including after a 421 response.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -183,8 +183,15 @@ mod http3 {
             mut request: Request<Body>,
         ) -> crate::Result<Response<ResponseBody>> {
             let origin = request.uri().clone();
-            let started = Instant::now();
-            let mut tcp_selection = TransportSelection::Origin;
+            let origin_retry = request
+                .extensions_mut()
+                .remove::<crate::retry::MisdirectedRetry>();
+            let started = origin_retry.map_or_else(Instant::now, |retry| retry.started);
+            let tcp_selection = if origin_retry.is_some() {
+                TransportSelection::MisdirectedFallback
+            } else {
+                TransportSelection::Origin
+            };
             let proxy = self
                 .proxies
                 .iter()
@@ -218,6 +225,7 @@ mod http3 {
             let allow_early = super::super::h3_client::can_send_early(&request);
 
             if self.discover
+                && origin_retry.is_none()
                 && supports_http3
                 && self.client.is_some()
                 && request.version() == Version::HTTP_11
@@ -265,11 +273,6 @@ mod http3 {
                     };
                     match prepared {
                         Prepared::Http3(connection, alternative) => {
-                            let replay = if alternative.requires_ech {
-                                None
-                            } else {
-                                clone_request(&request)
-                            };
                             *request.version_mut() = Version::HTTP_3;
                             if !alternative.from_dns {
                                 request.headers_mut().insert(
@@ -297,18 +300,21 @@ mod http3 {
                                             TransportSelection::AltSvc
                                         },
                                     );
-                                    tcp_selection = TransportSelection::MisdirectedFallback;
                                     self.cache.remove(&origin, &alternative);
                                     self.client.as_ref().unwrap().reject(
                                         &origin,
                                         alternative.authority,
                                         proxy.as_ref(),
                                     );
-                                    if let Some(replay) = replay {
-                                        request = replay;
-                                    } else {
-                                        return Ok(response);
+                                    // Evict the route even when replay is forbidden. The
+                                    // shared policy owns cloning, scope, limits and budget.
+                                    // ECH-required routes must never fall back to clear SNI.
+                                    if !alternative.requires_ech {
+                                        response
+                                            .extensions_mut()
+                                            .insert(crate::retry::MisdirectedRetry { started });
                                     }
+                                    return Ok(response);
                                 }
                                 Ok(mut response) => {
                                     self.annotate(
@@ -555,15 +561,5 @@ mod http3 {
                 );
             }
         }
-    }
-
-    fn clone_request(request: &Request<Body>) -> Option<Request<Body>> {
-        let mut replay = Request::new(request.body().try_clone()?);
-        *replay.method_mut() = request.method().clone();
-        *replay.uri_mut() = request.uri().clone();
-        *replay.headers_mut() = request.headers().clone();
-        *replay.version_mut() = request.version();
-        *replay.extensions_mut() = request.extensions().clone();
-        Some(replay)
     }
 }
