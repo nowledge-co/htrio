@@ -310,9 +310,9 @@ mod http3 {
                                     // shared policy owns cloning, scope, limits and budget.
                                     // ECH-required routes must never fall back to clear SNI.
                                     if !alternative.requires_ech {
-                                        response.extensions_mut().insert(
-                                            crate::retry::MisdirectedRetry { started },
-                                        );
+                                        response
+                                            .extensions_mut()
+                                            .insert(crate::retry::MisdirectedRetry { started });
                                     }
                                     return Ok(response);
                                 }
