@@ -3,7 +3,7 @@ publish = ["crates-io"]
 edition = "2021"
 rust-version = "1.89"
 name = "htrio-quinn"
-version = "0.11.12"
+version = "0.11.13"
 build = "build.rs"
 autolib = false
 autobins = false
@@ -154,7 +154,7 @@ optional = true
 version = "0.2"
 
 [dependencies.proto]
-version = "0.11.18"
+version = "0.11.20"
 default-features = false
 package = "htrio-quinn-proto"
 path = "../htrio-quinn-proto"

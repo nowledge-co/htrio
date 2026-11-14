@@ -6,7 +6,7 @@ default-members = ["."]
 [package]
 publish = ["crates-io"]
 name = "htrio"
-version = "0.1.0"
+version = "0.2.0"
 description = "A reqwest-compatible native HTTP/1, HTTP/2 and HTTP/3 client with Alt-Svc discovery"
 repository = "https://github.com/nowledge-co/htrio"
 keywords = ["http", "request", "client"]
@@ -19,6 +19,7 @@ rust-version = "1.89.0"
 autotests = true
 include = [
     "README.md",
+    "CHANGELOG.md",
     "UPSTREAM.md",
     "PUBLISHING.md",
     "Cargo.toml",
@@ -169,7 +170,7 @@ once_cell = { version = "1.18", optional = true }
 # HTTP/3 transport
 h3 = { package = "htrio-h3", path = "crates/htrio-h3", version = "=0.0.8", optional = true }
 h3-quinn = { package = "htrio-h3-quinn", path = "crates/htrio-h3-quinn", version = "=0.0.10", optional = true }
-quinn = { package = "htrio-quinn", path = "crates/htrio-quinn", version = "0.11.12", default-features = false, features = ["runtime-tokio"], optional = true }
+quinn = { package = "htrio-quinn", path = "crates/htrio-quinn", version = "0.11.13", default-features = false, features = ["runtime-tokio"], optional = true }
 futures-channel = { version = "0.3", optional = true }
 
 [dev-dependencies]

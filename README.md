@@ -18,7 +18,7 @@ Add htrio from crates.io:
 
 ```toml
 [dependencies]
-htrio = "0.1.0"
+htrio = "0.2.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -72,7 +72,7 @@ Default features include `rustls`, `http2`, `http3`, `charset`, `system-proxy`,
 are opt-in. For a smaller build, disable defaults and select features explicitly:
 
 ```toml
-htrio = { version = "0.1.0", default-features = false, features = ["rustls", "http2", "json", "stream"] }
+htrio = { version = "0.2.0", default-features = false, features = ["rustls", "http2", "json", "stream"] }
 ```
 
 ## HTTP/3 and Alt-Svc
@@ -219,7 +219,7 @@ Native TLS connections use HTTP/1 or HTTP/2.
 The API baseline is reqwest 0.13.4. Applications can retain their import name:
 
 ```toml
-reqwest = { package = "htrio", version = "0.1.0", features = ["json", "stream", "query", "multipart"] }
+reqwest = { package = "htrio", version = "0.2.0", features = ["json", "stream", "query", "multipart"] }
 ```
 
 `rustls-tls` is an alias for `rustls`, retained for existing Mem configurations.

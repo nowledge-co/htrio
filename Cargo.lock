@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "htrio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "brotli 8.0.4",
@@ -1565,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "htrio-quinn"
-version = "0.11.12"
+version = "0.11.13"
 dependencies = [
  "anyhow",
  "async-io",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "htrio-quinn-proto"
-version = "0.11.19"
+version = "0.11.20"
 dependencies = [
  "arbitrary",
  "assert_matches",

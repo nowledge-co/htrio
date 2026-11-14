@@ -53,10 +53,22 @@ unpublished packages with one or more `--package` arguments instead of
 | `htrio-h3-quinn` | `0.0.10` | `htrio-h3`, `htrio-h3-datagram` (optional), `htrio-quinn` |
 | `htrio` | `0.1.0` | `htrio-h3`, `htrio-h3-quinn`, `htrio-quinn` |
 
+For v0.2.0, publish only the three changed packages:
+
+| Package | Version | Updated dependency requirement |
+| --- | --- | --- |
+| `htrio-quinn-proto` | `0.11.20` | None |
+| `htrio-quinn` | `0.11.13` | `htrio-quinn-proto >= 0.11.20` |
+| `htrio` | `0.2.0` | `htrio-quinn >= 0.11.13` |
+
+```sh
+cargo publish --locked -j 2 --package htrio-quinn-proto --package htrio-quinn --package htrio
+```
+
 Published versions cannot be overwritten. If an upload is interrupted, inspect
 crates.io before retrying and use `--package` to select only unpublished packages.
 Do not bump versions merely to retry an upload whose outcome is unknown.
 
-After publication, verify `htrio = "0.1.0"` from a new project outside this
+After publication, verify `htrio = "0.2.0"` from a new project outside this
 workspace, including the default HTTP/3 dependencies. Tag the release commit as
-`v0.1.0` and push the tag to preserve its source identity.
+`v0.2.0` and push the tag to preserve its source identity.
