@@ -10,7 +10,7 @@ use crate::{shared::IssuedCid, Duration, Instant, TransportError};
 pub(super) struct CidState {
     /// Timestamp when issued cids should be retired
     retire_timestamp: VecDeque<CidTimestamp>,
-    /// Number of local connection IDs that have been issued in NEW_CONNECTION_ID frames.
+    /// Total number of local connection IDs issued, including handshake IDs.
     issued: u64,
     /// Sequence numbers of local connection IDs not yet retired by the peer
     active_seq: FxHashSet<u64>,
@@ -160,7 +160,7 @@ impl CidState {
                 "RETIRE_CONNECTION_ID when CIDs aren't in use",
             ));
         }
-        if sequence > self.issued {
+        if sequence >= self.issued {
             debug!(
                 sequence,
                 "got RETIRE_CONNECTION_ID for unissued sequence number"
