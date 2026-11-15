@@ -21,3 +21,5 @@ Git/path consumers. Changes are maintained and pushed with htrio.
 - Enforce the ACK Frequency draft-14 delay bound on received and generated
   frames, and reject ACK_FREQUENCY and IMMEDIATE_ACK in 0-RTT packets. The
   frame types and wire encoding remain unchanged.
+- Cover asymmetric zero-length CIDs, peer-advertised and local issuance limits,
+  and consecutive migrations that cannot receive replacement CIDs between moves.

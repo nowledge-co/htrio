@@ -428,6 +428,11 @@ impl<S, B> std::fmt::Debug for BufRecvStream<S, B> {
 }
 
 impl<S, B> BufRecvStream<S, B> {
+    #[cfg(test)]
+    pub(crate) fn inner(&self) -> &S {
+        &self.stream
+    }
+
     pub fn new(stream: S) -> Self {
         Self {
             buf: BufList::new(),

@@ -29,6 +29,86 @@ use super::h3_quinn;
 use super::{init_tracing, Pair};
 
 #[tokio::test]
+async fn priority_updates_reach_the_peer_control_stream() {
+    async fn read_varint(stream: &mut quinn::RecvStream) -> u64 {
+        let mut bytes = [0; 8];
+        stream.read_exact(&mut bytes[..1]).await.unwrap();
+        let len = 1 << (bytes[0] >> 6);
+        stream.read_exact(&mut bytes[1..len]).await.unwrap();
+        crate::proto::varint::BufExt::get_var(&mut &bytes[..len]).unwrap()
+    }
+
+    let mut pair = Pair::default();
+    let server = pair.server();
+    let (observed, received) = oneshot::channel();
+    let client = async {
+        let connection = pair.client_inner().await;
+        let (mut driver, mut sender) = client::new(h3_quinn::Connection::new(connection.clone()))
+            .await
+            .unwrap();
+        let first = sender
+            .send_request(Request::get("https://localhost/first").body(()).unwrap())
+            .await
+            .unwrap();
+        let second = sender
+            .send_request(Request::get("https://localhost/second").body(()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(first.priority_handle().stream_id(), 0);
+        assert_eq!(second.priority_handle().stream_id(), 4);
+        assert!(first
+            .priority_handle()
+            .update(crate::priority::Priority::new(2, true).unwrap()));
+        assert!(first
+            .priority_handle()
+            .update(crate::priority::Priority::new(0, false).unwrap()));
+        assert!(second
+            .priority_handle()
+            .update(crate::priority::Priority::new(7, true).unwrap()));
+
+        tokio::select! {
+            result = received => result.expect("peer must observe priority updates"),
+            error = driver.wait_idle() => panic!("connection closed before priority updates: {error:?}"),
+        }
+        connection.close(0u32.into(), b"priority updates verified");
+    };
+    let server = async {
+        let connection = server.endpoint.accept().await.unwrap().await.unwrap();
+        let mut other_streams = Vec::new();
+        let mut control = loop {
+            let mut stream = connection.accept_uni().await.unwrap();
+            if read_varint(&mut stream).await == 0 {
+                break stream;
+            }
+            other_streams.push(stream);
+        };
+        assert_eq!(read_varint(&mut control).await, 4);
+        let len = read_varint(&mut control).await;
+        let mut settings = vec![0; usize::try_from(len).unwrap()];
+        control.read_exact(&mut settings).await.unwrap();
+        for (stream_id, field) in [(0, "u=0"), (4, "u=7, i")] {
+            assert_eq!(read_varint(&mut control).await, 0xf0700);
+            let len = read_varint(&mut control).await;
+            let mut payload = vec![0; usize::try_from(len).unwrap()];
+            control.read_exact(&mut payload).await.unwrap();
+            let mut payload = payload.as_slice();
+            assert_eq!(
+                crate::proto::varint::BufExt::get_var(&mut payload).unwrap(),
+                stream_id
+            );
+            assert_eq!(payload, field.as_bytes());
+        }
+        observed.send(()).unwrap();
+        connection.closed().await;
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(client, server);
+    })
+    .await
+    .expect("peer must receive priority updates");
+}
+
+#[tokio::test]
 async fn connect() {
     let mut pair = Pair::default();
     let mut server = pair.server();

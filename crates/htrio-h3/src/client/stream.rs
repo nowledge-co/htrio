@@ -304,3 +304,59 @@ where
         )
     }
 }
+
+#[cfg(test)]
+mod priority_tests {
+    use http::{Request, Response};
+
+    use crate::{client, priority::Priority, server, tests::Pair};
+
+    #[tokio::test]
+    async fn request_priority_reaches_quinn_send_scheduler() {
+        let mut pair = Pair::default();
+        let mut server = pair.server();
+        let (finished, received) = tokio::sync::oneshot::channel();
+        let client = async {
+            let (_driver, mut sender) = client::new(pair.client().await).await.unwrap();
+            for (urgency, expected) in [(None, 0), (Some(0), 7), (Some(3), 4), (Some(7), 0)] {
+                let mut request = Request::post("https://localhost/priority")
+                    .body(())
+                    .unwrap();
+                if let Some(urgency) = urgency {
+                    request
+                        .extensions_mut()
+                        .insert(Priority::new(urgency, false).unwrap());
+                }
+                let mut stream = sender.send_request(request).await.unwrap();
+                assert_eq!(
+                    stream.inner.stream.stream.inner().priority().unwrap(),
+                    expected
+                );
+                stream.finish().await.unwrap();
+                assert_eq!(stream.recv_response().await.unwrap().status(), 200);
+            }
+            finished.send(()).unwrap();
+        };
+        let server = async {
+            let mut incoming = server::Connection::new(server.next().await).await.unwrap();
+            for _ in 0..4 {
+                let (_, mut stream) = incoming
+                    .accept()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .resolve_request()
+                    .await
+                    .unwrap();
+                stream.send_response(Response::<()>::new(())).await.unwrap();
+                stream.finish().await.unwrap();
+            }
+            received.await.unwrap();
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(client, server);
+        })
+        .await
+        .expect("priority requests must complete");
+    }
+}

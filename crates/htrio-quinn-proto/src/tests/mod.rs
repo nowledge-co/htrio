@@ -35,6 +35,7 @@ use crate::{
 mod util;
 use util::*;
 
+mod cid;
 mod token;
 
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
