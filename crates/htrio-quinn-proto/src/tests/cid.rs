@@ -59,38 +59,33 @@ fn cid_issuance_respects_peer_limits_with_asymmetric_cids() {
             let client_cids = if client_len == 0 {
                 0
             } else if server_len == 0 {
-                1
+                2
             } else {
-                4
+                5
             };
+            let client_stats = pair.client_conn_mut(client).stats();
+            let server_stats = pair.server_conn_mut(server).stats();
             assert_eq!(
-                pair.server_conn_mut(server)
-                    .stats()
-                    .frame_tx
-                    .new_connection_id,
-                server_cids
+                server_stats.frame_tx.new_connection_id, server_cids,
+                "server issuance: client_len={client_len}, server_len={server_len}, limit={limit}"
             );
-            assert_eq!(
-                pair.client_conn_mut(client)
-                    .stats()
-                    .frame_rx
-                    .new_connection_id,
-                server_cids
-            );
-            assert_eq!(
-                pair.client_conn_mut(client)
-                    .stats()
-                    .frame_tx
-                    .new_connection_id,
-                client_cids
-            );
-            assert_eq!(
-                pair.server_conn_mut(server)
-                    .stats()
-                    .frame_rx
-                    .new_connection_id,
-                client_cids
-            );
+            assert_eq!(client_stats.frame_rx.new_connection_id, server_cids);
+            assert_eq!(client_stats.frame_tx.new_connection_id, client_cids);
+            assert_eq!(server_stats.frame_rx.new_connection_id, client_cids);
+            if server_len != 0 {
+                assert_eq!(
+                    pair.server_conn_mut(server).active_local_cid_seq(),
+                    (0, limit - 1)
+                );
+            }
+            if client_len != 0 {
+                // The server retires the initial client CID to enable stateless resets.
+                // Its replacement increases cumulative issuance without exceeding the active limit.
+                assert_eq!(
+                    pair.client_conn_mut(client).active_local_cid_seq(),
+                    (1, client_cids)
+                );
+            }
             assert!(!pair.client_conn_mut(client).is_closed());
             assert!(!pair.server_conn_mut(server).is_closed());
         }
