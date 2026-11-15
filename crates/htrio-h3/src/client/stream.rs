@@ -309,7 +309,7 @@ where
 mod priority_tests {
     use http::{Request, Response};
 
-    use crate::{client, priority::Priority, server, tests::get_stream_blocking, tests::Pair};
+    use crate::{client, priority::Priority, server, tests::Pair};
 
     #[tokio::test]
     async fn request_priority_reaches_quinn_send_scheduler() {
@@ -340,7 +340,14 @@ mod priority_tests {
         let server = async {
             let mut incoming = server::Connection::new(server.next().await).await.unwrap();
             for _ in 0..4 {
-                let (_, mut stream) = get_stream_blocking(&mut incoming).await.unwrap();
+                let (_, mut stream) = incoming
+                    .accept()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .resolve_request()
+                    .await
+                    .unwrap();
                 stream.send_response(Response::<()>::new(())).await.unwrap();
                 stream.finish().await.unwrap();
             }
