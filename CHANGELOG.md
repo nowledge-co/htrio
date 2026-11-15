@@ -1,12 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-11-16
 
 ### Fixes
 
 - Apply the configured retry policy to automatic HTTP/3 421 recovery, including
   disabled retries, host scopes, classifiers, request limits and budgets.
-  Rejected alternatives are still evicted when replay is refused.
+  Rejected alternatives are still evicted when replay is refused. ([#6])
+- Reject RETIRE_CONNECTION_ID sequence numbers at or beyond the next unissued
+  CID with PROTOCOL_VIOLATION, including the first invalid sequence immediately
+  after handshake or subsequent issuance. ([#8])
+
+### Regression coverage
+
+- Verify HTTP/3 priority propagation to the Quinn send scheduler and the peer's
+  control stream, including queue saturation and coalescing. ([#7], [#8])
+- Cover asymmetric zero-length CIDs, peer and local issuance limits, repeated
+  port/IP migrations, and duplicate CID retirements. ([#7], [#8])
+
+### Dependencies
+
+- Require `htrio-quinn >= 0.11.14`, which requires
+  `htrio-quinn-proto >= 0.11.21`, so registry consumers receive the CID fix.
+- The minimum supported Rust version remains 1.89.
 
 ## 0.2.0 - 2026-11-14
 
@@ -40,6 +56,9 @@
 [#1]: https://github.com/nowledge-co/htrio/pull/1
 [#2]: https://github.com/nowledge-co/htrio/pull/2
 [#3]: https://github.com/nowledge-co/htrio/pull/3
+[#6]: https://github.com/nowledge-co/htrio/pull/6
+[#7]: https://github.com/nowledge-co/htrio/pull/7
+[#8]: https://github.com/nowledge-co/htrio/pull/8
 
 ## 0.1.0 - 2026-11-11
 
