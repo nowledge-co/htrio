@@ -270,6 +270,13 @@ where
     recv: RecvStream,
 }
 
+#[cfg(test)]
+impl<B: Buf> BidiStream<B> {
+    pub(crate) fn priority(&self) -> Result<i32, quinn::ClosedStream> {
+        self.send.stream.priority()
+    }
+}
+
 impl<B> quic::BidiStream<B> for BidiStream<B>
 where
     B: Buf,

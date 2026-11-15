@@ -33,6 +33,8 @@ inspection feature; htrio's runtime dependency does not require it.
   sections stateless. Check insert increments and track only referenced sections.
 - Add priority update queues and preserve pending response headers when a
   future is cancelled while waiting for QPACK instructions.
+- Verify request priorities against the Quinn send scheduler and decode queued
+  PRIORITY_UPDATE frames on the peer's control stream in regression tests.
 
 When enabling dynamic compression in a low-level server, continue polling the
 connection while request resolver futures await encoder instructions.
