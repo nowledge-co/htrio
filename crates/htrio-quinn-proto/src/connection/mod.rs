@@ -3710,6 +3710,14 @@ impl Connection {
         self.rem_cids.active_seq()
     }
 
+    #[cfg(test)]
+    pub(crate) fn queue_cid_retirement(&mut self, sequence: u64) {
+        self.spaces[SpaceId::Data]
+            .pending
+            .retire_cids
+            .push(sequence);
+    }
+
     /// Returns the detected maximum udp payload size for the current path
     #[cfg(test)]
     pub(crate) fn path_mtu(&self) -> u16 {

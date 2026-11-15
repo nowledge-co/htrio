@@ -23,3 +23,6 @@ Git/path consumers. Changes are maintained and pushed with htrio.
   frame types and wire encoding remain unchanged.
 - Cover asymmetric zero-length CIDs, peer-advertised and local issuance limits,
   and consecutive migrations that cannot receive replacement CIDs between moves.
+- Reject RETIRE_CONNECTION_ID sequence numbers at or beyond the next unissued
+  ID, including after handshake and preferred-address IDs. Verify encrypted
+  client/server rejection and single replenishment for duplicate retirements.
