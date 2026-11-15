@@ -221,3 +221,39 @@ struct CidTimestamp {
     /// Timestamp when cid needs to be retired
     timestamp: Instant,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ConnectionId, ResetToken, TransportErrorCode, RESET_TOKEN_SIZE};
+
+    #[test]
+    fn retirement_rejects_the_next_unissued_sequence() {
+        let now = Instant::now();
+        for initial in [1, 2] {
+            let mut state = CidState::new(8, None, now, initial);
+            for additional in [0, 2] {
+                let ids: Vec<_> = (initial..initial + additional)
+                    .map(|sequence| IssuedCid {
+                        sequence,
+                        id: ConnectionId::new(&[sequence as u8; 8]),
+                        reset_token: ResetToken::from([0; RESET_TOKEN_SIZE]),
+                    })
+                    .collect();
+                state.new_cids(&ids, now);
+                let next = initial + additional;
+                let active = state.active_seq.clone();
+                for sequence in [next, next + 1] {
+                    assert_eq!(
+                        state.on_cid_retirement(sequence, 8).unwrap_err().code,
+                        TransportErrorCode::PROTOCOL_VIOLATION,
+                        "initial={initial}, additional={additional}, sequence={sequence}"
+                    );
+                    assert_eq!(state.active_seq, active);
+                }
+            }
+            assert!(state.on_cid_retirement(initial + 1, 8).is_ok());
+            assert!(state.on_cid_retirement(initial + 1, 8).is_ok());
+        }
+    }
+}

@@ -194,3 +194,75 @@ fn consecutive_migrations_use_spare_cids_without_replenishment() {
         }
     }
 }
+
+#[test]
+fn retirement_of_the_next_unissued_cid_closes_the_connection() {
+    let _guard = subscribe();
+    for server_receives in [false, true] {
+        let mut pair = Pair::default();
+        let (client, server) = pair.connect();
+        let (sender, receiver) = if server_receives {
+            (&mut pair.client, &mut pair.server)
+        } else {
+            (&mut pair.server, &mut pair.client)
+        };
+        let (sender_handle, receiver_handle) = if server_receives {
+            (client, server)
+        } else {
+            (server, client)
+        };
+        let next = receiver.connections[&receiver_handle]
+            .active_local_cid_seq()
+            .1
+            + 1;
+        sender
+            .connections
+            .get_mut(&sender_handle)
+            .unwrap()
+            .queue_cid_retirement(next);
+        pair.drive();
+        let connection = if server_receives {
+            pair.server_conn_mut(server)
+        } else {
+            pair.client_conn_mut(client)
+        };
+        assert_matches!(
+            connection.poll(),
+            Some(Event::ConnectionLost {
+                reason: ConnectionError::TransportError(error),
+            }) if error.code == TransportErrorCode::PROTOCOL_VIOLATION
+        );
+    }
+}
+
+#[test]
+fn duplicate_retirement_only_replenishes_one_cid() {
+    let _guard = subscribe();
+    for server_receives in [false, true] {
+        let mut pair = Pair::default();
+        let (client, server) = pair.connect();
+        let (sender, receiver, sender_handle, receiver_handle) = if server_receives {
+            (&mut pair.client, &mut pair.server, client, server)
+        } else {
+            (&mut pair.server, &mut pair.client, server, client)
+        };
+        let issued = receiver.connections[&receiver_handle]
+            .stats()
+            .frame_tx
+            .new_connection_id;
+        let sender = sender.connections.get_mut(&sender_handle).unwrap();
+        let retired = sender.active_rem_cid_seq();
+        sender.local_address_changed();
+        sender.queue_cid_retirement(retired);
+        sender.queue_cid_retirement(retired);
+        pair.drive();
+        let receiver = if server_receives {
+            pair.server_conn_mut(server)
+        } else {
+            pair.client_conn_mut(client)
+        };
+        assert_eq!(receiver.stats().frame_tx.new_connection_id, issued + 1);
+        assert!(!pair.client_conn_mut(client).is_closed());
+        assert!(!pair.server_conn_mut(server).is_closed());
+    }
+}

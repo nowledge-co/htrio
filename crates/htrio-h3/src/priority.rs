@@ -117,4 +117,36 @@ mod tests {
         shared.set_closing();
         assert!(!handle.update(priority));
     }
+
+    #[test]
+    fn priority_queue_coalesces_existing_streams_at_capacity() {
+        let shared = Arc::new(SharedState::default());
+        for id in (0..256).map(|id| id * 4) {
+            assert!(Handle {
+                shared: shared.clone(),
+                id
+            }
+            .update(Priority::default()));
+        }
+        let existing = Handle {
+            shared: shared.clone(),
+            id: 0,
+        };
+        let latest = Priority::new(0, true).unwrap();
+        assert!(existing.update(latest));
+        let extra = Handle {
+            shared: shared.clone(),
+            id: 256 * 4,
+        };
+        assert!(!extra.update(latest));
+        {
+            let pending = shared.priorities.lock().unwrap();
+            assert_eq!(pending.len(), 256);
+            assert_eq!(pending.get(&0), Some(&latest));
+            assert!(!pending.contains_key(&extra.id));
+        }
+        shared.priorities.lock().unwrap().remove(&0);
+        assert!(extra.update(latest));
+        assert_eq!(shared.priorities.lock().unwrap().len(), 256);
+    }
 }
