@@ -77,10 +77,21 @@ The h3 and UDP packages retain their existing versions. Only test coverage
 changed in the h3 packages; their runtime implementation and public API are
 unchanged since the previous publication.
 
+For v0.4.0, publish the following packages in the same dependency order:
+
+| Package | Version | Updated dependency requirement |
+| --- | --- | --- |
+| `htrio-quinn-proto` | `0.11.22` | None |
+| `htrio-quinn` | `0.11.15` | `htrio-quinn-proto >= 0.11.22` |
+| `htrio` | `0.4.0` | `htrio-quinn >= 0.11.15` |
+
+The h3 and UDP packages retain their existing versions. BBRv3 changes only the
+three packages listed above.
+
 Published versions cannot be overwritten. If an upload is interrupted, inspect
 crates.io before retrying and use `--package` to select only unpublished packages.
 Do not bump versions merely to retry an upload whose outcome is unknown.
 
-After publication, verify `htrio = "0.3.0"` from a new project outside this
+After publication, verify `htrio = "0.4.0"` from a new project outside this
 workspace, including the default HTTP/3 dependencies. Tag the release commit as
-`v0.3.0` and push the tag to preserve its source identity.
+`v0.4.0` and push the tag to preserve its source identity.
