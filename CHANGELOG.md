@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.0 - 2026-11-18
+
+### Features
+
+- Add experimental BBRv3 congestion control for QUIC. The
+  `http3_congestion_bbr()` client option now selects BBRv3, while CUBIC remains
+  the default and callers can still select BBRv1 through a custom transport
+  configuration. ([#10])
+- Feed congestion controllers per-packet send, ACK, loss, ECN and cwnd-limited
+  events, and allow controllers to drive pacing rate and GSO send quantum.
+  ([#10])
+
+### Fixes
+
+- Finalize delivery-rate samples before updating the BBRv3 model, retain cwnd
+  credit for reordered ACK frames, and keep loss accounting synchronized with
+  bytes in flight. ([#10])
+- Complete ProbeStopping after one feedback round and use byte-consistent
+  ProbeBW_UP growth accounting. ([#10])
+
+### Regression coverage
+
+- Cover ACK-frame publication, reordered ACK credit, probe completion, timer
+  loss accounting, and a 512 KiB HTTP/3 upload with BBRv3 on the bulk sender.
+  ([#10])
+
+### Dependencies
+
+- Require `htrio-quinn >= 0.11.15`, which requires
+  `htrio-quinn-proto >= 0.11.22`, so registry consumers receive BBRv3 and its
+  controller integration.
+- The minimum supported Rust version remains 1.89.
+
 ## 0.3.0 - 2026-11-16
 
 ### Fixes
@@ -59,6 +92,7 @@
 [#6]: https://github.com/nowledge-co/htrio/pull/6
 [#7]: https://github.com/nowledge-co/htrio/pull/7
 [#8]: https://github.com/nowledge-co/htrio/pull/8
+[#10]: https://github.com/nowledge-co/htrio/pull/10
 
 ## 0.1.0 - 2026-11-11
 
