@@ -111,6 +111,41 @@ impl Pacer {
         // this is the time at which the pacing window becomes empty
         Some(self.prev + (unscaled_delay / 5) * 4)
     }
+
+    /// Return when `bytes_to_send` may be sent at `rate` bytes per second
+    ///
+    /// Used instead of [`Self::delay`] when the congestion controller computes its own pacing
+    /// rate. Credit accrues at `rate` for elapsed time and is bounded by a rate-derived burst
+    /// budget. Window-derived capacity is left untouched so [`Self::delay`] can resume normally.
+    pub(super) fn delay_at_rate(
+        &mut self,
+        rate: u64,
+        bytes_to_send: u64,
+        mtu: u16,
+        now: Instant,
+    ) -> Option<Instant> {
+        let rate = rate.max(1);
+        let capacity = rate_capacity(rate, mtu);
+        self.tokens = self.tokens.min(capacity);
+
+        let time_elapsed = now.checked_duration_since(self.prev).unwrap_or_else(|| {
+            warn!("received a timestamp early than a previous recorded time, ignoring");
+            Default::default()
+        });
+        let new_tokens = (rate as f64 * time_elapsed.as_secs_f64()) as u64;
+        // Preserve fractional-time credit by only advancing `prev` after earning a whole byte.
+        if new_tokens > 0 {
+            self.tokens = self.tokens.saturating_add(new_tokens).min(capacity);
+            self.prev = now;
+        }
+
+        // A packet larger than the bucket must still be released eventually.
+        let target = bytes_to_send.min(capacity);
+        if self.tokens >= target {
+            return None;
+        }
+        Some(now + Duration::from_secs_f64((target - self.tokens) as f64 / rate as f64))
+    }
 }
 
 /// Calculates a pacer capacity for a certain window and RTT
@@ -136,6 +171,16 @@ fn optimal_capacity(smoothed_rtt: Duration, window: u64, mtu: u16) -> u64 {
     capacity.clamp(MIN_BURST_SIZE * mtu as u64, MAX_BURST_SIZE * mtu as u64)
 }
 
+/// Calculates a pacer capacity for an explicit pacing rate in bytes per second
+fn rate_capacity(rate: u64, mtu: u16) -> u64 {
+    let mtu = u64::from(mtu);
+    let bytes_in = |nanos: u128| (u128::from(rate) * nanos / 1_000_000_000) as u64;
+    let max_capacity = bytes_in(MAX_BURST_INTERVAL_NANOS).max(mtu);
+    bytes_in(BURST_INTERVAL_NANOS)
+        .clamp(MIN_BURST_SIZE * mtu, MAX_BURST_SIZE * mtu)
+        .min(max_capacity)
+}
+
 /// The burst interval
 ///
 /// The capacity will we refilled in 4/5 of that time.
@@ -143,6 +188,9 @@ fn optimal_capacity(smoothed_rtt: Duration, window: u64, mtu: u16) -> u64 {
 /// If kernel-level pacing is supported later a higher time here might be
 /// more applicable.
 const BURST_INTERVAL_NANOS: u128 = 2_000_000; // 2ms
+
+/// Longest burst interval for a rate-paced connection
+const MAX_BURST_INTERVAL_NANOS: u128 = 10_000_000; // 10ms
 
 /// Allows some usage of GSO, and doesn't slow down the handshake.
 const MIN_BURST_SIZE: u64 = 10;
@@ -231,6 +279,41 @@ mod tests {
 
         pacer.delay(rtt, mtu as u64, 20_000, window, now);
         assert_eq!(pacer.capacity, 20_000_u64 * MIN_BURST_SIZE);
+    }
+
+    #[test]
+    fn paces_at_controller_rate() {
+        let mtu = 1200;
+        let (window, rtt) = (64_000_000, Duration::from_millis(5));
+        for rate in [12_500_000u64, 250_000] {
+            let start = Instant::now();
+            let mut pacer = Pacer::new(rtt, window, mtu, start);
+            let mut now = start;
+            let mut sent = 0u64;
+            while now < start + Duration::from_secs(1) {
+                match pacer.delay_at_rate(rate, mtu as u64, mtu, now) {
+                    None => {
+                        pacer.on_transmit(mtu);
+                        sent += mtu as u64;
+                    }
+                    Some(next) => now = next,
+                }
+            }
+            let error = sent.abs_diff(rate) as f64 / rate as f64;
+            assert!(error < 0.05, "rate {rate}: sent {sent} bytes in 1s");
+        }
+    }
+
+    #[test]
+    fn rate_capacity_bounds_bursts() {
+        let mtu = 1200;
+        assert_eq!(rate_capacity(12_500_000, mtu), 25_000);
+        assert_eq!(rate_capacity(250_000, mtu), 2_500);
+        assert_eq!(rate_capacity(1, mtu), mtu as u64);
+        assert_eq!(
+            rate_capacity(u64::MAX / 2, mtu),
+            MAX_BURST_SIZE * mtu as u64
+        );
     }
 
     #[test]

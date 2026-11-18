@@ -654,12 +654,12 @@ impl ClientBuilder {
         self.with_inner(|inner| inner.http3_send_window(value))
     }
 
-    /// Override the default congestion control algorithm to use [BBR]
+    /// Override the default congestion control algorithm to use experimental [BBRv3]
     ///
     /// The current default congestion control algorithm is [CUBIC]. This method overrides the
     /// default.
     ///
-    /// [BBR]: https://datatracker.ietf.org/doc/html/draft-ietf-ccwg-bbr
+    /// [BBRv3]: https://datatracker.ietf.org/doc/html/draft-ietf-ccwg-bbr
     /// [CUBIC]: https://datatracker.ietf.org/doc/html/rfc8312
     #[cfg(feature = "http3")]
     #[cfg_attr(docsrs, doc(cfg(feature = "http3")))]

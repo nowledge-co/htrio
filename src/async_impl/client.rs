@@ -572,7 +572,7 @@ impl ClientBuilder {
                     }
 
                     if quic_congestion_bbr {
-                        let factory = Arc::new(quinn::congestion::BbrConfig::default());
+                        let factory = Arc::new(quinn::congestion::Bbr3Config::default());
                         transport_config.congestion_controller_factory(factory);
                     }
 
@@ -2583,12 +2583,12 @@ impl ClientBuilder {
         self
     }
 
-    /// Override the default congestion control algorithm to use [BBR]
+    /// Override the default congestion control algorithm to use experimental [BBRv3]
     ///
     /// The current default congestion control algorithm is [CUBIC]. This method overrides the
     /// default.
     ///
-    /// [BBR]: https://datatracker.ietf.org/doc/html/draft-ietf-ccwg-bbr
+    /// [BBRv3]: https://datatracker.ietf.org/doc/html/draft-ietf-ccwg-bbr
     /// [CUBIC]: https://datatracker.ietf.org/doc/html/rfc8312
     #[cfg(feature = "http3")]
     #[cfg_attr(docsrs, doc(cfg(feature = "http3")))]
