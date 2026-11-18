@@ -468,6 +468,16 @@ impl Connection {
             false => 1,
             true => max_datagrams,
         };
+        // One snapshot per call: a controller may retune pacing as packets are sent, but a stale
+        // rate only governs the rest of this batch.
+        let metrics = self.path.congestion.metrics();
+        let max_datagrams = match metrics.send_quantum {
+            Some(quantum) => {
+                let datagrams = quantum / u64::from(self.path.current_mtu());
+                max_datagrams.min(usize::try_from(datagrams).unwrap_or(usize::MAX).max(1))
+            }
+            None => max_datagrams,
+        };
 
         let mut num_datagrams = 0;
         // Position in `buf` of the first byte of the current UDP datagram. When coalescing QUIC
@@ -526,6 +536,7 @@ impl Connection {
         let mut pad_datagram = false;
         let mut pad_datagram_to_mtu = false;
         let mut congestion_blocked = false;
+        let mut cwnd_blocked = false;
 
         // Iterate over all spaces and find data to send
         let mut space_idx = 0;
@@ -616,6 +627,7 @@ impl Connection {
                     if self.path.in_flight.bytes + bytes_to_send >= self.path.congestion.window() {
                         space_idx += 1;
                         congestion_blocked = true;
+                        cwnd_blocked = true;
                         // We continue instead of breaking here in order to avoid
                         // blocking loss probes queued for higher spaces.
                         trace!("blocked by congestion control");
@@ -624,13 +636,21 @@ impl Connection {
 
                     // Check whether the next datagram is blocked by pacing
                     let smoothed_rtt = self.path.rtt.get();
-                    if let Some(delay) = self.path.pacing.delay(
-                        smoothed_rtt,
-                        bytes_to_send,
-                        self.path.current_mtu(),
-                        self.path.congestion.window(),
-                        now,
-                    ) {
+                    let mtu = self.path.current_mtu();
+                    let delay = match metrics.pacer_rate {
+                        Some(rate) => self
+                            .path
+                            .pacing
+                            .delay_at_rate(rate, bytes_to_send, mtu, now),
+                        None => self.path.pacing.delay(
+                            smoothed_rtt,
+                            bytes_to_send,
+                            mtu,
+                            self.path.congestion.window(),
+                            now,
+                        ),
+                    };
+                    if let Some(delay) = delay {
                         self.timers.set(Timer::Pacing, delay);
                         congestion_blocked = true;
                         // Loss probes should be subject to pacing, even though
@@ -945,6 +965,9 @@ impl Connection {
         }
 
         self.app_limited = buf.is_empty() && !congestion_blocked;
+        if cwnd_blocked {
+            self.path.congestion.on_cwnd_limited();
+        }
 
         // Send MTU probe if necessary
         if buf.is_empty() && self.state.is_established() {
@@ -1524,7 +1547,7 @@ impl Connection {
                 // Notify ack frequency that a packet was acked, because it might contain an ACK_FREQUENCY frame
                 self.ack_frequency.on_acked(packet);
 
-                self.on_packet_acked(now, info);
+                self.on_packet_acked(now, packet, space, info);
             }
         }
 
@@ -1568,7 +1591,7 @@ impl Connection {
                 // reordering.
                 if new_largest {
                     let sent = self.spaces[space].largest_acked_packet_sent;
-                    self.process_ecn(now, space, newly_acked.len() as u64, ecn, sent);
+                    self.process_ecn(now, space, newly_acked.len() as u64, ecn, sent, ack.largest);
                 }
             } else {
                 // We always start out sending ECN, so any ack that doesn't acknowledge it disables it.
@@ -1589,6 +1612,7 @@ impl Connection {
         newly_acked: u64,
         ecn: frame::EcnCounts,
         largest_sent_time: Instant,
+        largest_sent_pn: u64,
     ) {
         match self.spaces[space].detect_ecn(newly_acked, ecn) {
             Err(e) => {
@@ -1604,13 +1628,19 @@ impl Connection {
                 self.path
                     .congestion
                     .on_congestion_event(now, largest_sent_time, false, 0);
+                self.path.congestion.on_ecn_congestion(
+                    now,
+                    largest_sent_time,
+                    largest_sent_pn,
+                    space,
+                );
             }
         }
     }
 
     // Not timing-aware, so it's safe to call this for inferred acks, such as arise from
     // high-latency handshakes
-    fn on_packet_acked(&mut self, now: Instant, info: SentPacket) {
+    fn on_packet_acked(&mut self, now: Instant, pn: u64, space: SpaceId, info: SentPacket) {
         self.remove_in_flight(&info);
         if info.ack_eliciting && self.path.challenge.is_none() {
             // Only pass ACKs to the congestion controller if we are not validating the current
@@ -1619,6 +1649,15 @@ impl Connection {
                 now,
                 info.time_sent,
                 info.size.into(),
+                self.app_limited,
+                &self.path.rtt,
+            );
+            self.path.congestion.on_packet_acked(
+                now,
+                info.time_sent,
+                info.size,
+                pn,
+                space,
                 self.app_limited,
                 &self.path.rtt,
             );
@@ -1790,6 +1829,9 @@ impl Connection {
                 }
                 self.spaces[pn_space].pending |= info.retransmits;
                 self.path.mtud.on_non_probe_lost(packet, info.size);
+                self.path
+                    .congestion
+                    .on_packet_lost(now, info.size, packet, pn_space);
             }
 
             if self.path.mtud.black_hole_detected(now) {
@@ -2507,7 +2549,7 @@ impl Connection {
 
                 let space = &mut self.spaces[SpaceId::Initial];
                 if let Some(info) = space.take(0) {
-                    self.on_packet_acked(now, info);
+                    self.on_packet_acked(now, 0, SpaceId::Initial, info);
                 };
 
                 self.discard_space(now, SpaceId::Initial); // Make sure we clean up after any retransmitted Initials

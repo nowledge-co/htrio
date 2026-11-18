@@ -17,6 +17,36 @@ use http_body_util::{BodyExt, StreamBody};
 use tokio::sync::oneshot;
 
 #[tokio::test]
+async fn bbr3_congestion_controller_transfers_a_multi_packet_response() {
+    const BODY_LEN: usize = 512 * 1024;
+    let server = Server::new(|_, mut stream| async move {
+        stream.send_response(Response::new(())).await.unwrap();
+        stream
+            .send_data(Bytes::from(vec![0x5a; BODY_LEN]))
+            .await
+            .unwrap();
+        stream.finish().await.unwrap();
+    })
+    .await;
+
+    let body = server
+        .client_builder()
+        .http3_congestion_bbr()
+        .build()
+        .unwrap()
+        .get(server.url("/"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+
+    assert_eq!(body.len(), BODY_LEN);
+    assert!(body.iter().all(|byte| *byte == 0x5a));
+}
+
+#[tokio::test]
 async fn informational_responses_precede_final_response() {
     let server = Server::new(|_, mut stream| async move {
         for status in [100, 103, 200] {

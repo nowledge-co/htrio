@@ -26,3 +26,7 @@ Git/path consumers. Changes are maintained and pushed with htrio.
 - Reject RETIRE_CONNECTION_ID sequence numbers at or beyond the next unissued
   ID, including after handshake and preferred-address IDs. Verify encrypted
   client/server rejection and single replenishment for duplicate retirements.
+- Add the experimental BBRv3 controller from Glassyiris/quinn commit
+  `af9eca9926d6bb0faa3484854120bf2b00ad1e8d`, retaining the IETF 2% loss
+  threshold. Feed it per-packet send, ACK, loss, and ECN events, and let it
+  control pacing rate and GSO send quantum.
