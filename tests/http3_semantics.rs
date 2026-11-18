@@ -47,6 +47,41 @@ async fn bbr3_congestion_controller_transfers_a_multi_packet_response() {
 }
 
 #[tokio::test]
+async fn bbr3_congestion_controller_transfers_a_multi_packet_upload() {
+    const BODY_LEN: usize = 512 * 1024;
+    let server = Server::new(|_, mut stream| async move {
+        let mut received = 0;
+        let mut valid = true;
+        while let Some(mut data) = stream.recv_data().await.unwrap() {
+            let chunk = data.copy_to_bytes(data.remaining());
+            received += chunk.len();
+            valid &= chunk.iter().all(|byte| *byte == 0x5a);
+        }
+        assert!(valid);
+        stream.send_response(Response::new(())).await.unwrap();
+        stream
+            .send_data(Bytes::from(received.to_string()))
+            .await
+            .unwrap();
+        stream.finish().await.unwrap();
+    })
+    .await;
+
+    let response = server
+        .client_builder()
+        .http3_congestion_bbr()
+        .build()
+        .unwrap()
+        .post(server.url("/"))
+        .body(vec![0x5a; BODY_LEN])
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.text().await.unwrap(), BODY_LEN.to_string());
+}
+
+#[tokio::test]
 async fn informational_responses_precede_final_response() {
     let server = Server::new(|_, mut stream| async move {
         for status in [100, 103, 200] {
