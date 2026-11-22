@@ -39,7 +39,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           if [[ "$EVENT_NAME" == "schedule" ]]; then
-            cargo fuzz run "$TARGET" -- -max_total_time=60
+            cargo fuzz run "$TARGET" --target x86_64-unknown-linux-gnu -- -max_total_time=60
           else
-            cargo fuzz run "$TARGET" -- -runs=2000
+            cargo fuzz run "$TARGET" --target x86_64-unknown-linux-gnu -- -runs=2000
           fi

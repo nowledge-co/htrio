@@ -47,7 +47,7 @@ jobs:
           openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
             -keyout "$INTEROP_DIR/key.pem" -out "$INTEROP_DIR/cert.pem" \
             -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost"
-          printf ':8443 {\n  tls %s/cert.pem %s/key.pem\n  respond "htrio-caddy-http3"\n}\n' \
+          printf '{\n  auto_https disable_redirects\n}\n:8443 {\n  tls %s/cert.pem %s/key.pem\n  respond "htrio-caddy-http3"\n}\n' \
             "$INTEROP_DIR" "$INTEROP_DIR" > "$INTEROP_DIR/Caddyfile"
           "$INTEROP_DIR/caddy" run --config "$INTEROP_DIR/Caddyfile" \
             > "$INTEROP_DIR/caddy.log" 2>&1 &
