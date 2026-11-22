@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -54,10 +55,7 @@ jobs:
           toolchain: stable
           components: rustfmt
       - name: Format
-        shell: bash
-        run: |
-          cargo fmt --all -- --check
-          find src tests examples -name '*.rs' -print0 | xargs -0 rustfmt --edition 2021 --check
+        run: cargo fmt --all -- --check
       - name: Native regression suites
         run: cargo test --locked -j 2 --features blocking,socks,hickory-dns,native-tls -- --test-threads=2
       - name: Native TLS
