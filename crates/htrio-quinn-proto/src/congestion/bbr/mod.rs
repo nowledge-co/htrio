@@ -64,6 +64,10 @@ impl Bbr {
     /// Construct a state using the given `config` and current time `now`
     pub fn new(config: Arc<BbrConfig>, current_mtu: u16) -> Self {
         let initial_window = config.initial_window;
+        let random_number_generator = config
+            .cycle_rng_seed
+            .map(Pcg32::from_seed)
+            .unwrap_or_else(|| Pcg32::from_rng(&mut rand::rng()));
         Self {
             config,
             current_mtu: current_mtu as u64,
@@ -98,7 +102,7 @@ impl Bbr {
             bw_at_last_round: 0,
             round_wo_bw_gain: 0,
             ack_aggregation: AckAggregationState::default(),
-            random_number_generator: Pcg32::from_rng(&mut rand::rng()),
+            random_number_generator,
         }
     }
 
@@ -518,6 +522,7 @@ impl Controller for Bbr {
 #[derive(Debug, Clone)]
 pub struct BbrConfig {
     initial_window: u64,
+    cycle_rng_seed: Option<[u8; 16]>,
 }
 
 impl BbrConfig {
@@ -528,12 +533,19 @@ impl BbrConfig {
         self.initial_window = value;
         self
     }
+
+    #[cfg(test)]
+    pub(super) fn cycle_rng_seed(&mut self, value: [u8; 16]) -> &mut Self {
+        self.cycle_rng_seed = Some(value);
+        self
+    }
 }
 
 impl Default for BbrConfig {
     fn default() -> Self {
         Self {
             initial_window: K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE,
+            cycle_rng_seed: None,
         }
     }
 }

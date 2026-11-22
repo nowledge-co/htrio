@@ -10,6 +10,10 @@ struct StreamParams {
     side: Side,
     max_remote_uni: u16,
     max_remote_bi: u16,
+    max_local_uni: u16,
+    max_local_bi: u16,
+    peer_max_data: u16,
+    peer_stream_data: u16,
     send_window: u16,
     receive_window: u16,
     stream_receive_window: u16,
@@ -21,9 +25,12 @@ enum Operation {
     Open,
     Accept(Dir),
     Finish(StreamId),
+    FinishOpened(u16),
     ReceivedStopSending(StreamId, VarInt),
+    StopOpened(u16, VarInt),
     ReceivedReset(ResetStream),
     Reset(StreamId),
+    ResetOpened(u16),
 }
 
 fuzz_target!(|input: (StreamParams, Vec<Operation>)| {
@@ -38,11 +45,20 @@ fuzz_target!(|input: (StreamParams, Vec<Operation>)| {
         params.receive_window.into(),
         params.stream_receive_window.into(),
     );
+    state.set_peer_params_for_fuzzing(
+        params.max_local_uni.max(1).into(),
+        params.max_local_bi.max(1).into(),
+        params.peer_max_data.max(1).into(),
+        params.peer_stream_data.max(1).into(),
+    );
+    let mut opened = Vec::new();
 
     for operation in operations {
         match operation {
             Operation::Open => {
-                Streams::new(&mut state, &connection).open(params.dir);
+                if let Some(id) = Streams::new(&mut state, &connection).open(params.dir) {
+                    opened.push(id);
+                }
             }
             Operation::Accept(dir) => {
                 Streams::new(&mut state, &connection).accept(dir);
@@ -50,10 +66,22 @@ fuzz_target!(|input: (StreamParams, Vec<Operation>)| {
             Operation::Finish(id) => {
                 let _ = SendStream::new(id, &mut state, &mut pending, &connection).finish();
             }
+            Operation::FinishOpened(index) => {
+                if let Some(&id) = opened.get(usize::from(index) % opened.len().max(1)) {
+                    let _ = SendStream::new(id, &mut state, &mut pending, &connection).finish();
+                }
+            }
             Operation::ReceivedStopSending(id, code) => {
                 Streams::new(&mut state, &connection)
                     .state()
                     .received_stop_sending(id, code);
+            }
+            Operation::StopOpened(index, code) => {
+                if let Some(&id) = opened.get(usize::from(index) % opened.len().max(1)) {
+                    Streams::new(&mut state, &connection)
+                        .state()
+                        .received_stop_sending(id, code);
+                }
             }
             Operation::ReceivedReset(reset) => {
                 let _ = Streams::new(&mut state, &connection)
@@ -63,6 +91,12 @@ fuzz_target!(|input: (StreamParams, Vec<Operation>)| {
             Operation::Reset(id) => {
                 let _ = SendStream::new(id, &mut state, &mut pending, &connection)
                     .reset(0u32.into());
+            }
+            Operation::ResetOpened(index) => {
+                if let Some(&id) = opened.get(usize::from(index) % opened.len().max(1)) {
+                    let _ = SendStream::new(id, &mut state, &mut pending, &connection)
+                        .reset(0u32.into());
+                }
             }
         }
     }

@@ -212,6 +212,25 @@ impl StreamsState {
         }
     }
 
+    #[cfg(fuzzing)]
+    #[allow(unreachable_pub)] // fuzzing only
+    pub fn set_peer_params_for_fuzzing(
+        &mut self,
+        max_streams_uni: VarInt,
+        max_streams_bidi: VarInt,
+        max_data: VarInt,
+        max_stream_data: VarInt,
+    ) {
+        let mut params = TransportParameters::default();
+        params.initial_max_streams_uni = max_streams_uni;
+        params.initial_max_streams_bidi = max_streams_bidi;
+        params.initial_max_data = max_data;
+        params.initial_max_stream_data_uni = max_stream_data;
+        params.initial_max_stream_data_bidi_local = max_stream_data;
+        params.initial_max_stream_data_bidi_remote = max_stream_data;
+        self.set_params(&params);
+    }
+
     /// Ensure we have space for at least a full flow control window of remotely-initiated streams
     /// to be open, and notify the peer if the window has moved
     fn ensure_remote_streams(&mut self, dir: Dir) {

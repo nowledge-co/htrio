@@ -195,10 +195,18 @@ mod qualification {
         utilization: f64,
     }
 
-    fn factory(name: &str) -> Arc<dyn ControllerFactory> {
+    fn factory(name: &str, seed: [u8; 16]) -> Arc<dyn ControllerFactory> {
         match name {
-            "bbr3" => Arc::new(Bbr3Config::default()),
-            "bbr1" => Arc::new(BbrConfig::default()),
+            "bbr3" => {
+                let mut config = Bbr3Config::default();
+                config.probe_rng_seed(seed);
+                Arc::new(config)
+            }
+            "bbr1" => {
+                let mut config = BbrConfig::default();
+                config.cycle_rng_seed(seed);
+                Arc::new(config)
+            }
             "cubic" => Arc::new(CubicConfig::default()),
             _ => panic!("unknown controller: {name}"),
         }
@@ -206,8 +214,8 @@ mod qualification {
 
     fn run(left: &str, right: &str) -> Result {
         let base = Instant::now();
-        let mut flows = [left, right].map(|name| Flow {
-            controller: factory(name).build(base, MSS as u16),
+        let mut flows = [(left, [1; 16]), (right, [2; 16])].map(|(name, seed)| Flow {
+            controller: factory(name, seed).build(base, MSS as u16),
             rtt: RttEstimator::new(Duration::from_nanos(RTT_NS)),
             inflight: 0,
             next_send_ns: 0,
@@ -281,8 +289,6 @@ mod qualification {
             let now = base + Duration::from_nanos(now_ns);
             let sent = base + Duration::from_nanos(event.send_ns);
             if event.acked {
-                flow.rtt
-                    .update(Duration::ZERO, Duration::from_nanos(now_ns - event.send_ns));
                 flow.controller.on_ack(now, sent, MSS, false, &flow.rtt);
                 flow.controller.on_packet_acked(
                     now,
@@ -295,6 +301,8 @@ mod qualification {
                 );
                 flow.controller
                     .on_end_acks(now, flow.inflight, false, Some(event.pn));
+                flow.rtt
+                    .update(Duration::ZERO, Duration::from_nanos(now_ns - event.send_ns));
                 if now_ns >= WARMUP_NS {
                     flow.delivered += MSS;
                 }
@@ -342,13 +350,14 @@ mod qualification {
     fn shared_bottleneck_matrix() {
         println!("left,right,left_bytes,right_bytes,left_lost,right_lost,jain,utilization");
         let cases = [
-            ("bbr3", "bbr3", 0.90),
+            ("bbr3", "bbr3", 0.90, 0.40),
             // The inherited BBRv1 implementation dominates BBRv3 in this model.
-            // Keep a floor just below the measured baseline so further regressions fail.
-            ("bbr3", "bbr1", 0.49),
-            ("bbr3", "cubic", 0.90),
+            // Require both a nontrivial BBRv3 share and a Jain index above the
+            // complete-starvation value of 0.5.
+            ("bbr3", "bbr1", 0.505, 0.01),
+            ("bbr3", "cubic", 0.90, 0.40),
         ];
-        for (left, right, min_fairness) in cases {
+        for (left, right, min_fairness, min_left_share) in cases {
             let result = run(left, right);
             println!(
                 "{left},{right},{},{},{},{},{:.4},{:.4}",
@@ -362,6 +371,12 @@ mod qualification {
             assert!(
                 result.fairness >= min_fairness,
                 "{left}/{right} fairness below qualification floor {min_fairness}: {result:?}"
+            );
+            let delivered = result.delivered[0] + result.delivered[1];
+            let left_share = result.delivered[0] as f64 / delivered as f64;
+            assert!(
+                left_share >= min_left_share,
+                "{left}/{right} left-flow delivery share below qualification floor {min_left_share}: {result:?}"
             );
             assert!(
                 result.utilization >= 0.75,
