@@ -45,6 +45,11 @@ middleware. Preserve header/body streaming and never infer safe replay from a
 transport error after dispatch. Keep protocol-specific code in the transport
 and HTTP/3 modules; avoid diverging from Hyper without a concrete failing case.
 
+`UPSTREAM.lock` records the last reviewed branch heads for reqwest, Quinn, h3,
+and the BBRv3 source branch. The weekly `Upstream sync` workflow opens or
+refreshes a tracking issue when any head moves; updating a reviewed head means
+the intervening security, protocol, and compatibility changes were inspected.
+
 Quinn and rustls provide the QUIC transport and TLS implementation. quiche and
 BoringSSL are deferred; neither is a dependency or an implemented backend.
 
@@ -54,7 +59,7 @@ connection availability checks, and upload cancellation notification. The Quinn
 adapter owns receive streams during pending reads. All local crates retain
 upstream licenses and revision metadata and are committed with htrio.
 
-The transport is vendored as `htrio-quinn` 0.11.12, `htrio-quinn-proto` 0.11.19,
+The transport is vendored as `htrio-quinn` 0.11.15, `htrio-quinn-proto` 0.11.22,
 and `htrio-quinn-udp` 0.5.16. Each package records its exact upstream revision in
 `UPSTREAM.md`; all internal dependencies use sibling paths. Quinn exposes a
 cancellation-safe chunk polling method for the HTTP/3 adapter.

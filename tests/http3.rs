@@ -459,7 +459,7 @@ async fn http3_test_reconnection() {
     assert!(matches!(
         err,
         StreamError::ConnectionError {
-            0: ConnectionError::Timeout { .. },
+            0: ConnectionError::Timeout,
             ..
         }
     ));

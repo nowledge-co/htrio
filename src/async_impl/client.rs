@@ -276,7 +276,7 @@ struct Config {
     #[cfg(feature = "http3")]
     quic_send_window: Option<u64>,
     #[cfg(feature = "http3")]
-    quic_congestion_bbr: bool,
+    quic_congestion_control: Option<crate::http3::CongestionControl>,
     #[cfg(feature = "http3")]
     h3_max_field_section_size: Option<u64>,
     #[cfg(feature = "http3")]
@@ -419,7 +419,7 @@ impl ClientBuilder {
                 #[cfg(feature = "http3")]
                 quic_send_window: None,
                 #[cfg(feature = "http3")]
-                quic_congestion_bbr: false,
+                quic_congestion_control: None,
                 #[cfg(feature = "http3")]
                 h3_max_field_section_size: None,
                 #[cfg(feature = "http3")]
@@ -543,7 +543,7 @@ impl ClientBuilder {
                  quic_stream_receive_window,
                  quic_receive_window,
                  quic_send_window,
-                 quic_congestion_bbr,
+                 quic_congestion_control,
                  h3_max_field_section_size,
                  h3_max_frame_size,
                  h3_send_grease,
@@ -571,23 +571,34 @@ impl ClientBuilder {
                         transport_config.send_window(send_window);
                     }
 
-                    if quic_congestion_bbr {
-                        let factory = Arc::new(quinn::congestion::Bbr3Config::default());
+                    if let Some(algorithm) = quic_congestion_control {
+                        use crate::http3::CongestionControl;
+
+                        let factory: Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> =
+                            match algorithm {
+                                CongestionControl::Cubic => {
+                                    Arc::new(quinn::congestion::CubicConfig::default())
+                                }
+                                CongestionControl::Bbr1 => {
+                                    Arc::new(quinn::congestion::BbrConfig::default())
+                                }
+                                CongestionControl::Bbr3 => {
+                                    Arc::new(quinn::congestion::Bbr3Config::default())
+                                }
+                            };
                         transport_config.congestion_controller_factory(factory);
                     }
 
-                    let mut h3_client_config = H3ClientConfig::default();
-                    h3_client_config.tls_info = tls_info;
-                    h3_client_config.verifier = verifier;
-                    h3_client_config.partition_sessions = partition_sessions;
-                    h3_client_config.qpack = h3_qpack;
-                    h3_client_config.coalescing = coalescing;
-
-                    if let Some(max_field_section_size) = h3_max_field_section_size {
-                        h3_client_config.max_field_section_size = Some(max_field_section_size);
-                    }
-
-                    h3_client_config.max_frame_size = h3_max_frame_size;
+                    let mut h3_client_config = H3ClientConfig {
+                        tls_info,
+                        verifier,
+                        partition_sessions,
+                        qpack: h3_qpack,
+                        coalescing,
+                        max_field_section_size: h3_max_field_section_size,
+                        max_frame_size: h3_max_frame_size,
+                        ..H3ClientConfig::default()
+                    };
 
                     if let Some(send_grease) = h3_send_grease {
                         h3_client_config.send_grease = Some(send_grease);
@@ -758,7 +769,7 @@ impl ClientBuilder {
                             config.quic_stream_receive_window,
                             config.quic_receive_window,
                             config.quic_send_window,
-                            config.quic_congestion_bbr,
+                            config.quic_congestion_control,
                             config.h3_max_field_section_size,
                             config.h3_max_frame_size,
                             config.h3_send_grease,
@@ -828,8 +839,7 @@ impl ClientBuilder {
 
                     // Allow user to have installed a runtime default.
                     // If not, we ship with _our_ recommended default.
-                    let provider = rustls::crypto::CryptoProvider::get_default()
-                        .map(|arc| arc.clone())
+                    let provider = rustls::crypto::CryptoProvider::get_default().cloned()
                         .unwrap_or_else(default_rustls_crypto_provider);
 
                     // Build TLS config
@@ -957,7 +967,7 @@ impl ClientBuilder {
                             config.quic_stream_receive_window,
                             config.quic_receive_window,
                             config.quic_send_window,
-                            config.quic_congestion_bbr,
+                            config.quic_congestion_control,
                             config.h3_max_field_section_size,
                             config.h3_max_frame_size,
                             config.h3_send_grease,
@@ -1127,7 +1137,7 @@ impl ClientBuilder {
         let redirect_policy_desc = if config.redirect_policy.is_default() {
             None
         } else {
-            Some(format!("{:?}", &config.redirect_policy))
+            Some(format!("{:?}", config.redirect_policy))
         };
 
         let connector = connector_builder.build(config.connector_layers);
@@ -2583,7 +2593,21 @@ impl ClientBuilder {
         self
     }
 
-    /// Override the default congestion control algorithm to use experimental [BBRv3]
+    /// Select the congestion control algorithm used by HTTP/3 QUIC connections.
+    ///
+    /// This overrides both the default CUBIC controller and any controller in a
+    /// custom [`TransportConfig`].
+    #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "http3")))]
+    pub fn http3_congestion_control(
+        mut self,
+        algorithm: crate::http3::CongestionControl,
+    ) -> ClientBuilder {
+        self.config.quic_congestion_control = Some(algorithm);
+        self
+    }
+
+    /// Override the default congestion control algorithm to use experimental [BBRv3].
     ///
     /// The current default congestion control algorithm is [CUBIC]. This method overrides the
     /// default.
@@ -2592,9 +2616,8 @@ impl ClientBuilder {
     /// [CUBIC]: https://datatracker.ietf.org/doc/html/rfc8312
     #[cfg(feature = "http3")]
     #[cfg_attr(docsrs, doc(cfg(feature = "http3")))]
-    pub fn http3_congestion_bbr(mut self) -> ClientBuilder {
-        self.config.quic_congestion_bbr = true;
-        self
+    pub fn http3_congestion_bbr(self) -> ClientBuilder {
+        self.http3_congestion_control(crate::http3::CongestionControl::Bbr3)
     }
 
     /// Set the maximum HTTP/3 header size this client is willing to accept.
@@ -2609,7 +2632,7 @@ impl ClientBuilder {
     #[cfg(feature = "http3")]
     #[cfg_attr(docsrs, doc(cfg(feature = "http3")))]
     pub fn http3_max_field_section_size(mut self, value: u64) -> ClientBuilder {
-        self.config.h3_max_field_section_size = Some(value.try_into().unwrap());
+        self.config.h3_max_field_section_size = Some(value);
         self
     }
 
@@ -3056,7 +3079,7 @@ impl Config {
 
         #[cfg(feature = "cookies")]
         {
-            if let Some(_) = self.cookie_store {
+            if self.cookie_store.is_some() {
                 f.field("cookie_store", &true);
             }
         }
@@ -3243,7 +3266,7 @@ impl ClientRef {
 
         #[cfg(feature = "cookies")]
         {
-            if let Some(_) = self.cookie_store {
+            if self.cookie_store.is_some() {
                 f.field("cookie_store", &true);
             }
         }

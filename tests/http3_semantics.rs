@@ -16,6 +16,18 @@ use http::{HeaderMap, HeaderValue, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
 use tokio::sync::oneshot;
 
+#[test]
+fn typed_congestion_control_algorithms_build() {
+    use htrio::http3::CongestionControl::{Bbr1, Bbr3, Cubic};
+
+    for algorithm in [Cubic, Bbr1, Bbr3] {
+        htrio::Client::builder()
+            .http3_congestion_control(algorithm)
+            .build()
+            .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn bbr3_congestion_controller_transfers_a_multi_packet_response() {
     const BODY_LEN: usize = 512 * 1024;

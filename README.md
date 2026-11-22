@@ -141,6 +141,9 @@ priority, preconnection, pool, and network maintenance APIs.
 
 Response extensions expose `http3::ConnectionInfo` with setup time, current RTT,
 loss/congestion/MTU statistics, connection reuse, and pool availability.
+QUIC congestion control is explicit through
+`http3_congestion_control(http3::CongestionControl::{Cubic, Bbr1, Bbr3})`;
+`http3_congestion_bbr()` remains a compatibility shortcut for BBRv3.
 `http3::TransportInfo` records per-hop time to headers, protocol, route selection,
 and confirmed recovery reasons, including TCP race/fallback. Pool snapshots
 include bounded route probes and confirmed failure backoff. `remote_addr()` reports

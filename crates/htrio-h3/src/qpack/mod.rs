@@ -14,8 +14,6 @@ mod static_;
 mod stream;
 mod vas;
 
-#[cfg(test)]
-pub use decoder::decode_stateless;
 mod decoder;
 mod encoder;
 

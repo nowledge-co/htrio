@@ -354,9 +354,9 @@ impl Response {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn copy_to<W: ?Sized>(&mut self, w: &mut W) -> crate::Result<u64>
+    pub fn copy_to<W>(&mut self, w: &mut W) -> crate::Result<u64>
     where
-        W: io::Write,
+        W: io::Write + ?Sized,
     {
         io::copy(self, w).map_err(crate::error::decode_io)
     }
@@ -409,7 +409,7 @@ impl Response {
     /// # fn main() {}
     /// ```
     pub fn error_for_status_ref(&self) -> crate::Result<&Self> {
-        self.inner.error_for_status_ref().and_then(|_| Ok(self))
+        self.inner.error_for_status_ref().map(|_| self)
     }
 
     // private

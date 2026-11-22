@@ -5,6 +5,7 @@
 //! See `UPSTREAM.md` for the pinned revision and local changes.
 #![deny(missing_docs, clippy::self_named_module_files)]
 #![allow(clippy::derive_partial_eq_without_eq)]
+#![cfg_attr(test, allow(unexpected_cfgs))]
 
 pub mod client;
 

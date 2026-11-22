@@ -116,19 +116,19 @@ pub(crate) fn extract_response_cookies<'a>(
     headers
         .get_all(SET_COOKIE)
         .iter()
-        .map(|value| Cookie::parse(value))
+        .map(Cookie::parse)
 }
 
 /// Error representing a parse failure of a 'Set-Cookie' header.
 pub(crate) struct CookieParseError(cookie_crate::ParseError);
 
-impl<'a> fmt::Debug for CookieParseError {
+impl fmt::Debug for CookieParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.0.fmt(f)
     }
 }
 
-impl<'a> fmt::Display for CookieParseError {
+impl fmt::Display for CookieParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.0.fmt(f)
     }

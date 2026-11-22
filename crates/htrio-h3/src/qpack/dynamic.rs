@@ -266,11 +266,11 @@ impl DynamicTable {
         DynamicTable::default()
     }
 
-    pub fn decoder(&self, base: usize) -> DynamicTableDecoder {
+    pub fn decoder(&self, base: usize) -> DynamicTableDecoder<'_> {
         DynamicTableDecoder { table: self, base }
     }
 
-    pub fn encoder(&mut self, stream_id: u64) -> DynamicTableEncoder {
+    pub fn encoder(&mut self, stream_id: u64) -> DynamicTableEncoder<'_> {
         for (idx, field) in self.fields.iter().enumerate() {
             self.name_map
                 .insert(field.name.clone(), self.vas.index(idx).unwrap());
@@ -962,7 +962,7 @@ mod tests {
         );
 
         assert_eq!(encoder.table.fields.len(), 1);
-        assert_eq!(encoder.table.fields, &[field_a.clone()]);
+        assert_eq!(encoder.table.fields, std::slice::from_ref(&field_a));
         assert_eq!(encoder.table.name_map.get(&field_a.name).copied(), Some(1));
         assert_eq!(encoder.table.field_map.get(&field_a).copied(), Some(1));
     }

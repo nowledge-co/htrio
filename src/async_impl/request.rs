@@ -5,9 +5,6 @@ use std::time::Duration;
 
 #[cfg(any(feature = "query", feature = "form", feature = "json"))]
 use serde::Serialize;
-#[cfg(feature = "json")]
-use serde_json;
-
 use super::body::Body;
 use super::client::{Client, Pending};
 #[cfg(feature = "multipart")]
