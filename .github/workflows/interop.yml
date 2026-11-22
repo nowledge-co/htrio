@@ -44,16 +44,28 @@ jobs:
         env:
           INTEROP_DIR: ${{ runner.temp }}
         run: |
-          openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
-            -keyout "$INTEROP_DIR/key.pem" -out "$INTEROP_DIR/cert.pem" \
-            -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost"
+          openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 1 \
+            -keyout "$INTEROP_DIR/ca-key.pem" -out "$INTEROP_DIR/ca.pem" \
+            -subj "/CN=htrio-interop-ca" \
+            -addext "basicConstraints=critical,CA:TRUE" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign"
+          openssl req -nodes -newkey rsa:2048 -sha256 \
+            -keyout "$INTEROP_DIR/key.pem" -out "$INTEROP_DIR/leaf.csr" \
+            -subj "/CN=localhost"
+          printf 'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n' \
+            > "$INTEROP_DIR/leaf.ext"
+          openssl x509 -req -sha256 -days 1 \
+            -in "$INTEROP_DIR/leaf.csr" \
+            -CA "$INTEROP_DIR/ca.pem" -CAkey "$INTEROP_DIR/ca-key.pem" \
+            -CAcreateserial -extfile "$INTEROP_DIR/leaf.ext" \
+            -out "$INTEROP_DIR/cert.pem"
           printf '{\n  auto_https disable_redirects\n}\n:8443 {\n  tls %s/cert.pem %s/key.pem\n  respond "htrio-caddy-http3"\n}\n' \
             "$INTEROP_DIR" "$INTEROP_DIR" > "$INTEROP_DIR/Caddyfile"
           "$INTEROP_DIR/caddy" run --config "$INTEROP_DIR/Caddyfile" \
             > "$INTEROP_DIR/caddy.log" 2>&1 &
           echo "CADDY_PID=$!" >> "$GITHUB_ENV"
           for _ in {1..30}; do
-            if curl --fail --silent --cacert "$INTEROP_DIR/cert.pem" \
+            if curl --fail --silent --cacert "$INTEROP_DIR/ca.pem" \
               https://localhost:8443/ > /dev/null; then
               exit 0
             fi
@@ -65,7 +77,7 @@ jobs:
       - name: Exchange an HTTP/3 request with Caddy
         env:
           HTRIO_INTEROP_URL: https://localhost:8443/
-          HTRIO_INTEROP_CA: ${{ runner.temp }}/cert.pem
+          HTRIO_INTEROP_CA: ${{ runner.temp }}/ca.pem
         run: cargo test --locked --test interop --features http3 -- --ignored --nocapture
 
       - name: Stop Caddy and show diagnostics
