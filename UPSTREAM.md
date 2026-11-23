@@ -53,13 +53,14 @@ the intervening security, protocol, and compatibility changes were inspected.
 Quinn and rustls provide the QUIC transport and TLS implementation. quiche and
 BoringSSL are deferred; neither is a dependency or an implemented backend.
 
-HTTP/3 uses the local `htrio-h3` and `htrio-h3-quinn` workspace packages under
-`crates/`, derived from h3 0.0.8 and h3-quinn 0.0.10. The protocol adds bounded frame parsing, incremental unknown-frame skipping,
+HTTP/3 uses the local `htrio-h3` 0.0.9 and `htrio-h3-quinn` 0.0.11 workspace
+packages under `crates/`, derived from h3 0.0.8 and h3-quinn 0.0.10. The protocol
+adds bounded frame parsing, incremental unknown-frame skipping,
 connection availability checks, and upload cancellation notification. The Quinn
 adapter owns receive streams during pending reads. All local crates retain
 upstream licenses and revision metadata and are committed with htrio.
 
-The transport is vendored as `htrio-quinn` 0.11.15, `htrio-quinn-proto` 0.11.22,
+The transport is vendored as `htrio-quinn` 0.11.16, `htrio-quinn-proto` 0.11.23,
 and `htrio-quinn-udp` 0.5.16. Each package records its exact upstream revision in
 `UPSTREAM.md`; all internal dependencies use sibling paths. Quinn exposes a
 cancellation-safe chunk polling method for the HTTP/3 adapter.

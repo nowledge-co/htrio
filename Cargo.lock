@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "htrio"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "brotli 8.0.4",
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "htrio-h3"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "assert_matches",
  "bytes",
@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "htrio-h3-datagram"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "bytes",
  "htrio-h3",
@@ -1551,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "htrio-h3-quinn"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "bytes",
  "futures",
@@ -1565,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "htrio-quinn"
-version = "0.11.15"
+version = "0.11.16"
 dependencies = [
  "anyhow",
  "async-io",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "htrio-quinn-proto"
-version = "0.11.22"
+version = "0.11.23"
 dependencies = [
  "arbitrary",
  "assert_matches",

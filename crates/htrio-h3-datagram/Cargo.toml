@@ -3,7 +3,7 @@ publish = ["crates-io"]
 edition = "2021"
 rust-version = "1.89"
 name = "htrio-h3-datagram"
-version = "0.0.2"
+version = "0.0.3"
 build = false
 autolib = false
 autobins = false
@@ -37,7 +37,7 @@ version = "1.4"
 [dependencies.h3]
 package = "htrio-h3"
 path = "../htrio-h3"
-version = "0.0.8"
+version = "0.0.9"
 features = ["i-implement-a-third-party-backend-and-opt-into-breaking-changes"]
 
 [dependencies.pin-project-lite]
