@@ -1,0 +1,5 @@
+# name|repository|tracked ref|last reviewed head|local provenance commit|provenance document
+reqwest|https://github.com/seanmonstar/reqwest.git|refs/heads/master|f331e1d5bea10b66bd1ba3ccbb12fdae34c92563|11489b34eda6d32b15ad4033e62beba2ee401350|UPSTREAM.md
+quinn|https://github.com/quinn-rs/quinn.git|refs/heads/main|0f9432f7c1cab0ea1469d02a935a89dae28693b7|8192ed399a26a6e8f0aba43d10ec8badaa5b905e|crates/htrio-quinn-proto/UPSTREAM.md
+h3|https://github.com/hyperium/h3.git|refs/heads/master|43745ad87e95b0c035ac9c547aad467303213425|22c1aa3f44d1463cd7644c8f654fffc9a6da305c|crates/htrio-h3/UPSTREAM.md
+bbr3|https://github.com/Glassyiris/quinn.git|refs/heads/main|88641c8308eeb393b29adf9dc96c11a2b8df451b|af9eca9926d6bb0faa3484854120bf2b00ad1e8d|crates/htrio-quinn-proto/UPSTREAM.md

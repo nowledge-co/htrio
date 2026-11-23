@@ -3,6 +3,14 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(test, deny(warnings))]
+// These describe deliberate internal shapes: transport setup needs a shared parameter set,
+// and boxing hot-path state machines solely to equalize enum sizes would add allocations.
+#![allow(
+    clippy::enum_variant_names,
+    clippy::large_enum_variant,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 
 //! # htrio
 //!

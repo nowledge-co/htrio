@@ -1,3 +1,5 @@
+#![allow(clippy::char_lit_as_u8)]
+
 use super::BitWindow;
 
 #[derive(Debug, PartialEq)]
@@ -312,11 +314,11 @@ impl<'a> Iterator for DecodeIter<'a> {
 }
 
 pub trait HpackStringDecode {
-    fn hpack_decode(&self) -> DecodeIter;
+    fn hpack_decode(&self) -> DecodeIter<'_>;
 }
 
 impl HpackStringDecode for Vec<u8> {
-    fn hpack_decode(&self) -> DecodeIter {
+    fn hpack_decode(&self) -> DecodeIter<'_> {
         DecodeIter {
             bit_pos: BitWindow::new(),
             content: self,

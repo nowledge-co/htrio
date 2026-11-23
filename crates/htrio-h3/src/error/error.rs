@@ -36,6 +36,11 @@ pub enum ConnectionError {
 }
 
 impl ConnectionError {
+    /// Returns whether this connection failed because it timed out.
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Timeout)
+    }
+
     /// Returns if the error is H3_NO_ERROR local or remote
     pub fn is_h3_no_error(&self) -> bool {
         match self {
@@ -142,6 +147,15 @@ pub enum StreamError {
 }
 
 impl StreamError {
+    /// Returns whether this stream failed because its connection timed out.
+    pub fn is_timeout(&self) -> bool {
+        match self {
+            Self::RequestNotSent { source } => source.is_timeout(),
+            Self::ConnectionError(error) => error.is_timeout(),
+            _ => false,
+        }
+    }
+
     /// Whether the complete request can be moved to a fresh connection safely.
     pub fn is_request_not_sent(&self) -> bool {
         matches!(self, Self::RequestNotSent { .. } | Self::RemoteClosing)

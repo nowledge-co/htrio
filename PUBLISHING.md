@@ -30,14 +30,35 @@ workspace packages that have not been published yet. It does not upload crates
 and does not require a crates.io token. Package verification is required even if
 workspace builds already pass.
 
+## Configure trusted publishing
+
+The `Release` GitHub Actions environment is the only automated publisher. For
+each of the seven crates, configure a crates.io trusted publisher with:
+
+- repository owner `nowledge-co` and repository `htrio`;
+- workflow file `release.yml`;
+- environment `release`.
+
+Protect that GitHub environment with required reviewers. After all publishers
+are configured, enable crates.io's trusted-publishing-only mode for every crate.
+The workflow exchanges GitHub's OIDC identity for a short-lived token; no
+long-lived registry secret is stored in GitHub.
+
 ## Publish
 
-Authenticate with `cargo login` or an existing Cargo credential provider. Never
-commit tokens. After the exact release commit passes CI, publish the workspace:
+After the exact release commit passes CI, dispatch the `Release` workflow with
+the existing immutable tag. The script checks that the tag matches the `htrio`
+version, skips versions already visible on crates.io, publishes the remaining
+packages in dependency order, and creates the GitHub release only after registry
+read-back succeeds:
 
 ```sh
-cargo publish --workspace --locked -j 2
+gh workflow run release.yml -f tag=v0.4.0
 ```
+
+For an emergency manual release, authenticate with `cargo login` or a Cargo
+credential provider and run `scripts/publish-release.sh` from the exact tag.
+Never commit tokens.
 
 Cargo orders uploads by dependency. For later releases, select only changed,
 unpublished packages with one or more `--package` arguments instead of
@@ -88,10 +109,12 @@ For v0.4.0, publish the following packages in the same dependency order:
 The h3 and UDP packages retain their existing versions. BBRv3 changes only the
 three packages listed above.
 
-Published versions cannot be overwritten. If an upload is interrupted, inspect
-crates.io before retrying and use `--package` to select only unpublished packages.
-Do not bump versions merely to retry an upload whose outcome is unknown.
+Published versions cannot be overwritten. The release script is safe to retry:
+it inspects crates.io before each upload and waits for registry visibility before
+publishing dependants. Do not bump versions merely to retry an upload whose
+outcome is unknown.
 
 After publication, verify `htrio = "0.4.0"` from a new project outside this
-workspace, including the default HTTP/3 dependencies. Tag the release commit as
-`v0.4.0` and push the tag to preserve its source identity.
+workspace, including the default HTTP/3 dependencies. The release workflow uses
+the existing `v0.4.0` tag and creates the corresponding GitHub release; never
+move or recreate a published release tag.

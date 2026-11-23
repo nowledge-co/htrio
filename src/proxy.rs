@@ -455,7 +455,7 @@ impl Proxy {
 
 fn cache_maybe_has_http_auth(url: &Url, extra: &Option<HeaderValue>) -> bool {
     (url.scheme() == "http" || url.scheme() == "https")
-        && (url.username().len() > 0 || url.password().is_some() || extra.is_some())
+        && (!url.username().is_empty() || url.password().is_some() || extra.is_some())
 }
 
 fn cache_maybe_has_http_custom_headers(url: &Url, extra: &Option<HeaderMap>) -> bool {

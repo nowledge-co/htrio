@@ -421,7 +421,7 @@ async fn http3_test_h3_stop_sending_before_response_internal_error() {
 #[cfg(feature = "http3")]
 #[tokio::test]
 async fn http3_test_reconnection() {
-    use h3::error::{ConnectionError, StreamError};
+    use h3::error::StreamError;
 
     let server = server::Http3::new().build(|_| async { http::Response::default() });
     let addr = server.addr();
@@ -456,13 +456,7 @@ async fn http3_test_reconnection() {
         .find_map(|error| error.downcast_ref::<StreamError>())
         .expect("stream failure must remain visible in the source chain");
 
-    assert!(matches!(
-        err,
-        StreamError::ConnectionError {
-            0: ConnectionError::Timeout { .. },
-            ..
-        }
-    ));
+    assert!(err.is_timeout());
 
     let server = server::Http3::new()
         .with_addr(addr)

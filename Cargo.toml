@@ -2,6 +2,7 @@
 resolver = "2"
 members = [".", "crates/htrio-h3", "crates/htrio-h3-quinn", "crates/htrio-h3-datagram", "crates/htrio-quinn", "crates/htrio-quinn-proto", "crates/htrio-quinn-udp"]
 default-members = ["."]
+exclude = ["fuzz"]
 
 [package]
 publish = ["crates-io"]

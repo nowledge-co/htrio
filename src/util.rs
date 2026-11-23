@@ -32,7 +32,7 @@ pub(crate) fn fast_random() -> u64 {
 
     thread_local! {
         static KEY: RandomState = RandomState::new();
-        static COUNTER: Cell<u64> = Cell::new(0);
+        static COUNTER: Cell<u64> = const { Cell::new(0) };
     }
 
     KEY.with(|key| {
@@ -119,7 +119,7 @@ impl fmt::Display for Escape<'_> {
             } else if c == b'\0' {
                 write!(f, "\\0")?;
             // ASCII printable
-            } else if c >= 0x20 && c < 0x7f {
+            } else if (0x20..0x7f).contains(&c) {
                 write!(f, "{}", c as char)?;
             } else {
                 write!(f, "\\x{c:02x}")?;

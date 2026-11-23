@@ -1,0 +1,46 @@
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: "53 18 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Compare reviewed and current upstream heads
+        id: upstream
+        run: |
+          set +e
+          scripts/check-upstream.sh | tee upstream-report.md
+          status=${PIPESTATUS[0]}
+          cat upstream-report.md >> "$GITHUB_STEP_SUMMARY"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          case "$status" in
+            0|1) ;;
+            *) exit "$status" ;;
+          esac
+
+      - name: Open or refresh the upstream review issue
+        if: steps.upstream.outputs.status == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          issue=$(gh issue list --state open \
+            --search '"Automated upstream drift report" in:title' \
+            --json number --jq '.[0].number')
+          if [[ -n "$issue" ]]; then
+            gh issue edit "$issue" --body-file upstream-report.md
+          else
+            gh issue create --title "Automated upstream drift report" \
+              --body-file upstream-report.md
+          fi

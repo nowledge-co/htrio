@@ -328,7 +328,7 @@ fn test_allowed_methods_blocking() {
         .get("https://google.com")
         .send();
 
-    assert_eq!(resp.is_err(), false);
+    assert!(!resp.is_err());
 
     let resp = htrio::blocking::Client::builder()
         .https_only(true)
@@ -337,7 +337,7 @@ fn test_allowed_methods_blocking() {
         .get("http://google.com")
         .send();
 
-    assert_eq!(resp.is_err(), true);
+    assert!(resp.is_err());
 }
 
 /// Test that a [`htrio::blocking::Body`] can be created from [`bytes::Bytes`].
@@ -405,7 +405,7 @@ fn test_response_no_tls_info_for_http() {
     assert_eq!(res.status(), htrio::StatusCode::OK);
     assert_eq!(res.content_length(), Some(5));
     let tls_info = res.extensions().get::<htrio::tls::TlsInfo>();
-    assert_eq!(tls_info.is_none(), true);
+    assert!(tls_info.is_none());
 
     let body = res.text().unwrap();
     assert_eq!(b"Hello", body.as_bytes());

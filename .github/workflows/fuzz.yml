@@ -1,0 +1,45 @@
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - "crates/htrio-h3/**"
+      - "crates/htrio-quinn-proto/**"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    - cron: "23 20 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [quic_packet, transport_params, stream_id, streams, h3_varint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
+        with:
+          toolchain: nightly
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.67.34
+        with:
+          tool: cargo-fuzz
+      - name: Exercise ${{ matrix.target }}
+        working-directory: fuzz
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [[ "$EVENT_NAME" == "schedule" ]]; then
+            cargo fuzz run "$TARGET" --target x86_64-unknown-linux-gnu -- -max_total_time=60
+          else
+            cargo fuzz run "$TARGET" --target x86_64-unknown-linux-gnu -- -runs=2000
+          fi

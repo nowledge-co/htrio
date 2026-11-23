@@ -1,0 +1,91 @@
+name: HTTP/3 interop
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "crates/htrio-h3/**"
+      - "crates/htrio-h3-quinn/**"
+      - "crates/htrio-quinn/**"
+      - "crates/htrio-quinn-proto/**"
+      - "tests/interop.rs"
+      - ".github/workflows/interop.yml"
+  schedule:
+    - cron: "11 21 * * 4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  caddy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
+        with:
+          toolchain: stable
+
+      - name: Install checksum-pinned Caddy 2.10.2
+        working-directory: ${{ runner.temp }}
+        env:
+          CADDY_SHA512: 747df7ee74de188485157a383633a1a963fd9233b71fbb4a69ddcbcc589ce4e2cc82dacf5dbbe136cb51d17e14c59daeb5d9bc92487610b0f3b93680b2646546
+        run: |
+          curl --fail --location --silent --show-error \
+            --output caddy.tar.gz \
+            https://github.com/caddyserver/caddy/releases/download/v2.10.2/caddy_2.10.2_linux_amd64.tar.gz
+          echo "$CADDY_SHA512  caddy.tar.gz" | sha512sum --check
+          tar -xzf caddy.tar.gz caddy
+
+      - name: Start a certificate-pinned Caddy HTTP/3 origin
+        env:
+          INTEROP_DIR: ${{ runner.temp }}
+        run: |
+          openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 1 \
+            -keyout "$INTEROP_DIR/ca-key.pem" -out "$INTEROP_DIR/ca.pem" \
+            -subj "/CN=htrio-interop-ca" \
+            -addext "basicConstraints=critical,CA:TRUE" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign"
+          openssl req -nodes -newkey rsa:2048 -sha256 \
+            -keyout "$INTEROP_DIR/key.pem" -out "$INTEROP_DIR/leaf.csr" \
+            -subj "/CN=localhost"
+          printf 'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n' \
+            > "$INTEROP_DIR/leaf.ext"
+          openssl x509 -req -sha256 -days 1 \
+            -in "$INTEROP_DIR/leaf.csr" \
+            -CA "$INTEROP_DIR/ca.pem" -CAkey "$INTEROP_DIR/ca-key.pem" \
+            -CAcreateserial -extfile "$INTEROP_DIR/leaf.ext" \
+            -out "$INTEROP_DIR/cert.pem"
+          printf '{\n  auto_https disable_redirects\n}\n:8443 {\n  tls %s/cert.pem %s/key.pem\n  respond "htrio-caddy-http3"\n}\n' \
+            "$INTEROP_DIR" "$INTEROP_DIR" > "$INTEROP_DIR/Caddyfile"
+          "$INTEROP_DIR/caddy" run --config "$INTEROP_DIR/Caddyfile" \
+            > "$INTEROP_DIR/caddy.log" 2>&1 &
+          echo "CADDY_PID=$!" >> "$GITHUB_ENV"
+          for _ in {1..30}; do
+            if curl --fail --silent --cacert "$INTEROP_DIR/ca.pem" \
+              https://localhost:8443/ > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$INTEROP_DIR/caddy.log"
+          exit 1
+
+      - name: Exchange an HTTP/3 request with Caddy
+        env:
+          HTRIO_INTEROP_URL: https://localhost:8443/
+          HTRIO_INTEROP_CA: ${{ runner.temp }}/ca.pem
+        run: cargo test --locked --test interop --features http3 -- --ignored --nocapture
+
+      - name: Stop Caddy and show diagnostics
+        if: always()
+        env:
+          INTEROP_DIR: ${{ runner.temp }}
+        run: |
+          if [[ -n "${CADDY_PID:-}" ]]; then
+            kill "$CADDY_PID" || true
+          fi
+          cat "$INTEROP_DIR/caddy.log" || true

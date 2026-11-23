@@ -169,19 +169,19 @@ impl Pool {
     pub fn try_pool(&self, key: &Key) -> Option<PoolClient> {
         let mut inner = self.inner.lock().unwrap();
         let timeout = inner.timeout;
-        if let Some(conn) = inner.idle_conns.get(&key) {
+        if let Some(conn) = inner.idle_conns.get(key) {
             // We check first if the connection still valid
             // and if not, we remove it from the pool.
             if conn.is_invalid() {
                 trace!("pooled HTTP/3 connection is invalid so removing it...");
-                inner.idle_conns.remove(&key);
+                inner.idle_conns.remove(key);
                 return None;
             }
 
             if let Some(duration) = timeout {
                 if Instant::now().saturating_duration_since(conn.idle_timeout) > duration {
                     trace!("pooled connection expired");
-                    inner.idle_conns.remove(&key);
+                    inner.idle_conns.remove(key);
                     return None;
                 }
             }
@@ -189,8 +189,7 @@ impl Pool {
 
         inner
             .idle_conns
-            .get_mut(&key)
-            .and_then(|conn| Some(conn.pool()))
+            .get_mut(key).map(|conn| conn.pool())
     }
 
     pub fn coalescing_candidates(&self, key: &Key) -> Vec<(Key, PoolClient)> {

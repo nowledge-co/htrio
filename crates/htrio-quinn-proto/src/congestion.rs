@@ -154,3 +154,234 @@ pub trait ControllerFactory {
 }
 
 const BASE_DATAGRAM_SIZE: u64 = 1200;
+
+#[cfg(test)]
+mod qualification {
+    use super::*;
+    use crate::Duration;
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    const MSS: u64 = 1200;
+    const LINK_BYTES_PER_SECOND: u64 = 1_250_000;
+    const RTT_NS: u64 = 40_000_000;
+    const RUN_NS: u64 = 30_000_000_000;
+    const WARMUP_NS: u64 = 10_000_000_000;
+
+    struct Flow {
+        controller: Box<dyn Controller>,
+        rtt: RttEstimator,
+        inflight: u64,
+        next_send_ns: u64,
+        pn: u64,
+        delivered: u64,
+        lost: u64,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    struct Event {
+        at_ns: u64,
+        flow: usize,
+        pn: u64,
+        send_ns: u64,
+        acked: bool,
+    }
+
+    #[derive(Debug)]
+    struct Result {
+        delivered: [u64; 2],
+        lost: [u64; 2],
+        fairness: f64,
+        utilization: f64,
+    }
+
+    fn factory(name: &str, seed: [u8; 16]) -> Arc<dyn ControllerFactory> {
+        match name {
+            "bbr3" => {
+                let mut config = Bbr3Config::default();
+                config.probe_rng_seed(seed);
+                Arc::new(config)
+            }
+            "bbr1" => {
+                let mut config = BbrConfig::default();
+                config.cycle_rng_seed(seed);
+                Arc::new(config)
+            }
+            "cubic" => Arc::new(CubicConfig::default()),
+            _ => panic!("unknown controller: {name}"),
+        }
+    }
+
+    fn run(left: &str, right: &str) -> Result {
+        let base = Instant::now();
+        let mut flows = [(left, [1; 16]), (right, [2; 16])].map(|(name, seed)| Flow {
+            controller: factory(name, seed).build(base, MSS as u16),
+            rtt: RttEstimator::new(Duration::from_nanos(RTT_NS)),
+            inflight: 0,
+            next_send_ns: 0,
+            pn: 0,
+            delivered: 0,
+            lost: 0,
+        });
+        let mut events: BinaryHeap<Reverse<Event>> = BinaryHeap::new();
+        let mut now_ns = 0;
+        let mut bottleneck_free_ns = RTT_NS / 2;
+        let service_ns = MSS * 1_000_000_000 / LINK_BYTES_PER_SECOND;
+        let queue_limit_ns = RTT_NS * 2;
+
+        while now_ns < RUN_NS {
+            let next_event_ns = events.peek().map_or(u64::MAX, |event| event.0.at_ns);
+            let mut send_flow = None;
+            let mut send_ns = u64::MAX;
+            for (index, flow) in flows.iter_mut().enumerate() {
+                if flow.inflight + MSS <= flow.controller.window() {
+                    let candidate = flow.next_send_ns.max(now_ns);
+                    if (candidate, index) < (send_ns, send_flow.unwrap_or(usize::MAX)) {
+                        send_ns = candidate;
+                        send_flow = Some(index);
+                    }
+                } else {
+                    flow.controller.on_cwnd_limited();
+                }
+            }
+
+            if let Some(index) = send_flow.filter(|_| send_ns <= next_event_ns) {
+                now_ns = send_ns;
+                let flow = &mut flows[index];
+                let now = base + Duration::from_nanos(now_ns);
+                let pn = flow.pn;
+                flow.pn += 1;
+                flow.controller
+                    .on_packet_sent(now, MSS as u16, pn, SpaceId::Data);
+                flow.controller.on_sent(now, MSS, pn);
+                flow.inflight += MSS;
+
+                let arrival_ns = now_ns + RTT_NS / 2;
+                let service_start_ns = arrival_ns.max(bottleneck_free_ns);
+                let (at_ns, acked) = if service_start_ns - arrival_ns > queue_limit_ns {
+                    (now_ns + RTT_NS, false)
+                } else {
+                    bottleneck_free_ns = service_start_ns + service_ns;
+                    (bottleneck_free_ns + RTT_NS / 2, true)
+                };
+                events.push(Reverse(Event {
+                    at_ns,
+                    flow: index,
+                    pn,
+                    send_ns: now_ns,
+                    acked,
+                }));
+
+                let metrics = flow.controller.metrics();
+                let fallback_rate = flow.controller.window().saturating_mul(1_000_000_000)
+                    / flow.rtt.get().as_nanos().max(1) as u64;
+                let pacing_rate = metrics.pacer_rate.unwrap_or(fallback_rate).max(MSS);
+                flow.next_send_ns = now_ns + MSS * 1_000_000_000 / pacing_rate;
+                continue;
+            }
+
+            let Reverse(event) = events
+                .pop()
+                .expect("simulation has no send or feedback event");
+            now_ns = event.at_ns;
+            let flow = &mut flows[event.flow];
+            flow.inflight -= MSS;
+            let now = base + Duration::from_nanos(now_ns);
+            let sent = base + Duration::from_nanos(event.send_ns);
+            if event.acked {
+                flow.controller.on_ack(now, sent, MSS, false, &flow.rtt);
+                flow.controller.on_packet_acked(
+                    now,
+                    sent,
+                    MSS as u16,
+                    event.pn,
+                    SpaceId::Data,
+                    false,
+                    &flow.rtt,
+                );
+                flow.controller
+                    .on_end_acks(now, flow.inflight, false, Some(event.pn));
+                flow.rtt
+                    .update(Duration::ZERO, Duration::from_nanos(now_ns - event.send_ns));
+                if now_ns >= WARMUP_NS {
+                    flow.delivered += MSS;
+                }
+            } else {
+                flow.controller
+                    .on_packet_lost(now, MSS as u16, event.pn, SpaceId::Data);
+                flow.controller.on_congestion_event(now, sent, false, MSS);
+                if now_ns >= WARMUP_NS {
+                    flow.lost += MSS;
+                }
+            }
+        }
+
+        let delivered = flows.each_ref().map(|flow| flow.delivered);
+        let lost = flows.each_ref().map(|flow| flow.lost);
+        let sum = (delivered[0] + delivered[1]) as f64;
+        let squares = (delivered[0] as f64).powi(2) + (delivered[1] as f64).powi(2);
+        let fairness = sum.powi(2) / (2.0 * squares);
+        let capacity =
+            LINK_BYTES_PER_SECOND as f64 * Duration::from_nanos(RUN_NS - WARMUP_NS).as_secs_f64();
+
+        Result {
+            delivered,
+            lost,
+            fairness,
+            utilization: sum / capacity,
+        }
+    }
+
+    #[test]
+    fn two_bbr3_flows_share_a_bottleneck() {
+        let result = run("bbr3", "bbr3");
+        assert!(
+            result.fairness >= 0.90,
+            "BBRv3 self-fairness below qualification floor: {result:?}"
+        );
+        assert!(
+            result.utilization >= 0.75,
+            "BBRv3 bottleneck utilization below qualification floor: {result:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "scheduled qualification matrix; prints stable machine-readable results"]
+    fn shared_bottleneck_matrix() {
+        println!("left,right,left_bytes,right_bytes,left_lost,right_lost,jain,utilization");
+        let cases = [
+            ("bbr3", "bbr3", 0.90, 0.40),
+            // The inherited BBRv1 implementation dominates BBRv3 in this model.
+            // Require both a nontrivial BBRv3 share and a Jain index above the
+            // complete-starvation value of 0.5.
+            ("bbr3", "bbr1", 0.505, 0.01),
+            ("bbr3", "cubic", 0.90, 0.40),
+        ];
+        for (left, right, min_fairness, min_left_share) in cases {
+            let result = run(left, right);
+            println!(
+                "{left},{right},{},{},{},{},{:.4},{:.4}",
+                result.delivered[0],
+                result.delivered[1],
+                result.lost[0],
+                result.lost[1],
+                result.fairness,
+                result.utilization
+            );
+            assert!(
+                result.fairness >= min_fairness,
+                "{left}/{right} fairness below qualification floor {min_fairness}: {result:?}"
+            );
+            let delivered = result.delivered[0] + result.delivered[1];
+            let left_share = result.delivered[0] as f64 / delivered as f64;
+            assert!(
+                left_share >= min_left_share,
+                "{left}/{right} left-flow delivery share below qualification floor {min_left_share}: {result:?}"
+            );
+            assert!(
+                result.utilization >= 0.75,
+                "{left}/{right} utilization below qualification floor: {result:?}"
+            );
+        }
+    }
+}

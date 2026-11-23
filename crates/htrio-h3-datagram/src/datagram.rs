@@ -22,7 +22,7 @@ where
     /// Creates a new datagram frame
     pub fn new(stream_id: StreamId, payload: B) -> Self {
         assert!(
-            stream_id.into_inner() % 4 == 0,
+            stream_id.into_inner().is_multiple_of(4),
             "StreamId is not divisible by 4"
         );
         // StreamId will be divided by 4 when encoding the Datagram header
@@ -106,7 +106,7 @@ where
 
     fn chunk(&self) -> &[u8] {
         if self.len - self.pos > 0 {
-            return &self.stream_id[self.pos..self.len];
+            &self.stream_id[self.pos..self.len]
         } else {
             self.payload.chunk()
         }

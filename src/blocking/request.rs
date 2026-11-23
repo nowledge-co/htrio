@@ -120,11 +120,10 @@ impl Request {
     /// None is returned if a body is which can not be cloned. This can be because the body is a
     /// stream.
     pub fn try_clone(&self) -> Option<Request> {
-        let body = if let Some(ref body) = self.body.as_ref() {
-            if let Some(body) = body.try_clone() {
+        let body = if let Some(body) = self.body.as_ref() {
+            {
+                let body = body.try_clone()?;
                 Some(body)
-            } else {
-                return None;
             }
         } else {
             None
@@ -132,7 +131,7 @@ impl Request {
         let mut req = Request::new(self.method().clone(), self.url().clone());
         *req.timeout_mut() = self.timeout().copied();
         *req.headers_mut() = self.headers().clone();
-        *req.version_mut() = self.version().clone();
+        *req.version_mut() = self.version();
         req.body = body;
         Some(req)
     }
@@ -1053,7 +1052,7 @@ mod tests {
             .body("test test test")
             .unwrap();
         let req: Request = Request::try_from(http_request).unwrap();
-        assert_eq!(req.body().is_none(), false);
+        assert!(!req.body().is_none());
         let test_data = b"test test test";
         assert_eq!(req.body().unwrap().as_bytes(), Some(&test_data[..]));
         let headers = req.headers();
@@ -1072,7 +1071,7 @@ mod tests {
             .body("test test test")
             .unwrap();
         let req: Request = Request::try_from(http_request).unwrap();
-        assert_eq!(req.body().is_none(), false);
+        assert!(!req.body().is_none());
         let test_data = b"test test test";
         assert_eq!(req.body().unwrap().as_bytes(), Some(&test_data[..]));
         let headers = req.headers();
@@ -1098,7 +1097,7 @@ mod tests {
             req.headers()["authorization"],
             "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
         );
-        assert_eq!(req.headers()["authorization"].is_sensitive(), true);
+        assert!(req.headers()["authorization"].is_sensitive());
     }
 
     #[test]
@@ -1114,7 +1113,7 @@ mod tests {
 
         assert_eq!(req.url().as_str(), "https://localhost/");
         assert_eq!(req.headers()["authorization"], "Bearer Hold my bear");
-        assert_eq!(req.headers()["authorization"].is_sensitive(), true);
+        assert!(req.headers()["authorization"].is_sensitive());
     }
 
     #[test]

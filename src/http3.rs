@@ -13,6 +13,22 @@ pub use quinn::{ConnectionStats, TransportConfig};
 #[cfg(feature = "http3-qlog")]
 pub use quinn::{QlogConfig, QlogStream};
 
+/// Congestion control algorithm for HTTP/3 QUIC connections.
+///
+/// The default remains [`Cubic`](Self::Cubic). BBR variants are available for
+/// applications that have qualified them against their own paths and traffic.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum CongestionControl {
+    /// CUBIC congestion control (RFC 9438).
+    #[default]
+    Cubic,
+    /// The original BBR implementation retained for compatibility testing.
+    Bbr1,
+    /// Experimental BBRv3 congestion control.
+    Bbr3,
+}
+
 /// A live HTTP/3 connection handle available in response extensions.
 #[derive(Clone)]
 pub struct ConnectionInfo {

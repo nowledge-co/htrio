@@ -1,0 +1,51 @@
+[package]
+name = "htrio-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1.4", features = ["derive"] }
+bytes = "1"
+libfuzzer-sys = "0.4"
+
+[dependencies.proto]
+package = "htrio-quinn-proto"
+path = "../crates/htrio-quinn-proto"
+features = ["arbitrary"]
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "quic_packet"
+path = "fuzz_targets/quic_packet.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "transport_params"
+path = "fuzz_targets/transport_params.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "stream_id"
+path = "fuzz_targets/stream_id.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "streams"
+path = "fuzz_targets/streams.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h3_varint"
+path = "fuzz_targets/h3_varint.rs"
+test = false
+doc = false

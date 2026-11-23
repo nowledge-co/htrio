@@ -654,7 +654,17 @@ impl ClientBuilder {
         self.with_inner(|inner| inner.http3_send_window(value))
     }
 
-    /// Override the default congestion control algorithm to use experimental [BBRv3]
+    /// Select the congestion control algorithm used by HTTP/3 QUIC connections.
+    #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "http3")))]
+    pub fn http3_congestion_control(
+        self,
+        algorithm: crate::http3::CongestionControl,
+    ) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_congestion_control(algorithm))
+    }
+
+    /// Override the default congestion control algorithm to use experimental [BBRv3].
     ///
     /// The current default congestion control algorithm is [CUBIC]. This method overrides the
     /// default.

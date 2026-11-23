@@ -1,0 +1,30 @@
+name: Congestion qualification
+
+on:
+  schedule:
+    - cron: "37 20 * * 5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shared-bottleneck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
+        with:
+          toolchain: stable
+      - name: Compare BBRv3 with BBRv1 and CUBIC on a shared bottleneck
+        run: |
+          set -o pipefail
+          cargo test -p htrio-quinn-proto --locked \
+            congestion::qualification::shared_bottleneck_matrix \
+            -- --ignored --nocapture | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Compile public-client performance benchmarks
+        run: cargo check --locked --no-default-features --features http3 --benches

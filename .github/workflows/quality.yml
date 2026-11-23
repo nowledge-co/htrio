@@ -1,0 +1,51 @@
+name: Quality
+
+on:
+  pull_request:
+  schedule:
+    - cron: "41 18 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  semver:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.67.34
+        with:
+          tool: cargo-semver-checks
+      - name: Check public API compatibility against the PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: cargo semver-checks --workspace --baseline-rev "$BASE_SHA" --all-features
+
+  coverage:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.67.34
+        with:
+          tool: cargo-llvm-cov
+      - name: Record workspace coverage summary
+        run: |
+          set -o pipefail
+          cargo llvm-cov --workspace --all-features --summary-only --locked | tee -a "$GITHUB_STEP_SUMMARY"

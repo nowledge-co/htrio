@@ -207,7 +207,7 @@ mod background_threadpool {
                     _ = tx.closed() => {
                         // receiver already dropped, don't need to do anything
                     }
-                    result = response.map_err(|err| Into::<BoxError>::into(err)) => {
+                    result = response.map_err(Into::<BoxError>::into) => {
                         // if this fails, the receiver already dropped, so we don't need to do anything
                         let _ = tx.send(result);
                     }
@@ -247,7 +247,7 @@ mod background_threadpool {
             // now poll on the receiver end of the oneshot to get the result
             match this.rx.poll(cx) {
                 Poll::Ready(v) => match v {
-                    Ok(v) => Poll::Ready(v.map_err(Into::into)),
+                    Ok(v) => Poll::Ready(v),
                     Err(err) => Poll::Ready(Err(Box::new(err) as BoxError)),
                 },
                 Poll::Pending => Poll::Pending,
@@ -260,5 +260,5 @@ mod background_threadpool {
 // for wasm32 target, because tokio isn't compatible with wasm32.
 // If you aren't building for wasm32, you don't need that line.
 // The two lines below avoid the "'main' function not found" error when building for wasm32 target.
-#[cfg(any(target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 fn main() {}

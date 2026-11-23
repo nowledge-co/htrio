@@ -8,8 +8,8 @@ pub trait IntoUrl: IntoUrlSealed {}
 
 impl IntoUrl for Url {}
 impl IntoUrl for String {}
-impl<'a> IntoUrl for &'a str {}
-impl<'a> IntoUrl for &'a String {}
+impl IntoUrl for &str {}
+impl IntoUrl for &String {}
 
 pub trait IntoUrlSealed {
     // Besides parsing as a valid `Url`, the `Url` must be a valid
@@ -43,7 +43,7 @@ impl IntoUrlSealed for Url {
     }
 }
 
-impl<'a> IntoUrlSealed for &'a str {
+impl IntoUrlSealed for &str {
     fn into_url(self) -> crate::Result<Url> {
         Url::parse(self).map_err(crate::error::builder)?.into_url()
     }
@@ -53,7 +53,7 @@ impl<'a> IntoUrlSealed for &'a str {
     }
 }
 
-impl<'a> IntoUrlSealed for &'a String {
+impl IntoUrlSealed for &String {
     fn into_url(self) -> crate::Result<Url> {
         (&**self).into_url()
     }
