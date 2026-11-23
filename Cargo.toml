@@ -7,7 +7,7 @@ exclude = ["fuzz"]
 [package]
 publish = ["crates-io"]
 name = "htrio"
-version = "0.4.0"
+version = "0.5.0"
 description = "A reqwest-compatible native HTTP/1, HTTP/2 and HTTP/3 client with Alt-Svc discovery"
 repository = "https://github.com/nowledge-co/htrio"
 keywords = ["http", "request", "client"]
@@ -169,9 +169,9 @@ hickory-resolver = { version = "0.26", optional = true, features = ["tokio"] }
 once_cell = { version = "1.18", optional = true }
 
 # HTTP/3 transport
-h3 = { package = "htrio-h3", path = "crates/htrio-h3", version = "=0.0.8", optional = true }
-h3-quinn = { package = "htrio-h3-quinn", path = "crates/htrio-h3-quinn", version = "=0.0.10", optional = true }
-quinn = { package = "htrio-quinn", path = "crates/htrio-quinn", version = "0.11.15", default-features = false, features = ["runtime-tokio"], optional = true }
+h3 = { package = "htrio-h3", path = "crates/htrio-h3", version = "=0.0.9", optional = true }
+h3-quinn = { package = "htrio-h3-quinn", path = "crates/htrio-h3-quinn", version = "=0.0.11", optional = true }
+quinn = { package = "htrio-quinn", path = "crates/htrio-quinn", version = "0.11.16", default-features = false, features = ["runtime-tokio"], optional = true }
 futures-channel = { version = "0.3", optional = true }
 
 [dev-dependencies]

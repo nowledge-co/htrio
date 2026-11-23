@@ -53,7 +53,7 @@ packages in dependency order, and creates the GitHub release only after registry
 read-back succeeds:
 
 ```sh
-gh workflow run release.yml -f tag=v0.4.0
+gh workflow run release.yml -f tag=v0.5.0
 ```
 
 For an emergency manual release, authenticate with `cargo login` or a Cargo
@@ -109,12 +109,27 @@ For v0.4.0, publish the following packages in the same dependency order:
 The h3 and UDP packages retain their existing versions. BBRv3 changes only the
 three packages listed above.
 
+For v0.5.0, publish the following packages in dependency order:
+
+| Package | Version | Updated dependency requirement |
+| --- | --- | --- |
+| `htrio-quinn-proto` | `0.11.23` | None |
+| `htrio-quinn` | `0.11.16` | `htrio-quinn-proto >= 0.11.23` |
+| `htrio-h3` | `0.0.9` | Quinn packages for development only |
+| `htrio-h3-datagram` | `0.0.3` | `htrio-h3 = 0.0.9` |
+| `htrio-h3-quinn` | `0.0.11` | `htrio-h3 = 0.0.9`, `htrio-h3-datagram = 0.0.3` (optional), `htrio-quinn >= 0.11.16` |
+| `htrio` | `0.5.0` | `htrio-h3 = 0.0.9`, `htrio-h3-quinn = 0.0.11`, `htrio-quinn >= 0.11.16` |
+
+The H3 packages include timeout classification helpers and source maintenance
+from PR #12. Publish the protocol and its adapters together so registry consumers
+share the same H3 types. The unchanged UDP package remains 0.5.16.
+
 Published versions cannot be overwritten. The release script is safe to retry:
 it inspects crates.io before each upload and waits for registry visibility before
 publishing dependants. Do not bump versions merely to retry an upload whose
 outcome is unknown.
 
-After publication, verify `htrio = "0.4.0"` from a new project outside this
-workspace, including the default HTTP/3 dependencies. The release workflow uses
-the existing `v0.4.0` tag and creates the corresponding GitHub release; never
-move or recreate a published release tag.
+After publication, verify `htrio = "0.5.0"` from a new project outside this
+workspace, including the default HTTP/3 dependencies. Create `v0.5.0` only after
+the release commit passes CI, then dispatch the release workflow with that exact
+tag. Never move or recreate an existing release tag.

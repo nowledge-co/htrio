@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.0 - 2026-11-23
+
+### Features
+
+- Add typed HTTP/3 congestion control selection through
+  `CongestionControl::{Cubic, Bbr1, Bbr3}` to async and blocking clients. Preserve
+  `http3_congestion_bbr()` as a BBRv3 shortcut and CUBIC as the default. ([#12])
+- Expose timeout classification helpers on HTTP/3 connection and stream errors.
+  ([#12])
+
+### Qualification and maintenance
+
+- Add deterministic shared-bottleneck congestion tests, protocol fuzz targets,
+  and certificate-pinned HTTP/3 interoperability checks against Caddy. The
+  BBRv3/BBRv1 result remains a known weak coexistence baseline. ([#12])
+- Add dependency-ordered trusted publishing from immutable release tags,
+  supply-chain checks, API compatibility checks, and weekly upstream drift
+  monitoring with execution failures propagated to CI. ([#12])
+
+### Dependencies
+
+- Require `htrio-quinn >= 0.11.16` and `htrio-quinn-proto >= 0.11.23` for the
+  updated transport source.
+- Require `htrio-h3 = 0.0.9` and `htrio-h3-quinn = 0.0.11`; the adapter's
+  optional DATAGRAM feature uses `htrio-h3-datagram 0.0.3` with the same H3
+  protocol types.
+- Update the locked `url` dependency to 2.5.9. The UDP package remains 0.5.16,
+  and the minimum supported Rust version remains 1.89.
+
 ## 0.4.0 - 2026-11-18
 
 ### Features
@@ -93,6 +122,7 @@
 [#7]: https://github.com/nowledge-co/htrio/pull/7
 [#8]: https://github.com/nowledge-co/htrio/pull/8
 [#10]: https://github.com/nowledge-co/htrio/pull/10
+[#12]: https://github.com/nowledge-co/htrio/pull/12
 
 ## 0.1.0 - 2026-11-11
 
