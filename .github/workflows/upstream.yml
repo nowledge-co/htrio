@@ -25,7 +25,10 @@ jobs:
           status=${PIPESTATUS[0]}
           cat upstream-report.md >> "$GITHUB_STEP_SUMMARY"
           echo "status=$status" >> "$GITHUB_OUTPUT"
-          exit 0
+          case "$status" in
+            0|1) ;;
+            *) exit "$status" ;;
+          esac
 
       - name: Open or refresh the upstream review issue
         if: steps.upstream.outputs.status == '1'

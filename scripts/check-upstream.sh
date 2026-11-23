@@ -15,14 +15,17 @@ while IFS='|' read -r name repository tracked_ref reviewed_head provenance docum
 
     if ! grep -Fq "$provenance" "$root/$document"; then
         echo "missing provenance $provenance in $document" >&2
-        exit 1
+        exit 2
     fi
 
-    result=$(git ls-remote "$repository" "$tracked_ref")
+    if ! result=$(git ls-remote "$repository" "$tracked_ref"); then
+        echo "unable to query $name $tracked_ref" >&2
+        exit 2
+    fi
     current_head=${result%%$'\t'*}
     if [[ -z "$current_head" || "$current_head" == "$result" ]]; then
         echo "unable to resolve $name $tracked_ref" >&2
-        exit 1
+        exit 2
     fi
 
     status="reviewed"
