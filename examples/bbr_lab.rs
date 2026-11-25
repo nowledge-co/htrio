@@ -41,6 +41,15 @@ fn token() -> LabResult<String> {
     Ok(token)
 }
 
+fn segmentation_offload_enabled() -> LabResult<bool> {
+    match env::var("HTRIO_LAB_DISABLE_GSO") {
+        Err(env::VarError::NotPresent) => Ok(true),
+        Ok(value) if value == "0" => Ok(true),
+        Ok(value) if value == "1" => Ok(false),
+        _ => Err(invalid("HTRIO_LAB_DISABLE_GSO must be 0 or 1").into()),
+    }
+}
+
 async fn serve(bind: SocketAddr, name: &str, ca_file: &str) -> LabResult<()> {
     let token = Arc::new(token()?);
     let identity = rcgen::generate_simple_self_signed(vec![name.to_owned()])?;
@@ -58,6 +67,7 @@ async fn serve(bind: SocketAddr, name: &str, ca_file: &str) -> LabResult<()> {
         quinn::crypto::rustls::QuicServerConfig::try_from(tls)?,
     ));
     let mut transport = quinn::TransportConfig::default();
+    transport.enable_segmentation_offload(segmentation_offload_enabled()?);
     transport.max_concurrent_bidi_streams(4_u32.into());
     transport.max_idle_timeout(Some(TIMEOUT.try_into()?));
     config.transport_config(Arc::new(transport));
@@ -166,6 +176,7 @@ async fn run(url: &str, ca_file: &str, network: &str, bytes: usize, runs: usize)
         .into());
     }
     let token = token()?;
+    let gso_enabled = segmentation_offload_enabled()?;
     let certificate = htrio::Certificate::from_pem(&fs::read(ca_file)?)?;
     let payload = Bytes::from(vec![0x5a; bytes]);
     let algorithms = [
@@ -184,6 +195,7 @@ async fn run(url: &str, ca_file: &str, network: &str, bytes: usize, runs: usize)
                 "revision": option_env!("HTRIO_LAB_REVISION").unwrap_or("unrecorded"),
                 "package_version": env!("CARGO_PKG_VERSION"),
                 "os": env::consts::OS, "arch": env::consts::ARCH,
+                "gso_enabled": gso_enabled,
                 "unix_ms": SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
             });
             match measure(
@@ -192,6 +204,7 @@ async fn run(url: &str, ca_file: &str, network: &str, bytes: usize, runs: usize)
                 &token,
                 algorithm,
                 payload.clone(),
+                gso_enabled,
             )
             .await
             {
@@ -226,11 +239,15 @@ async fn measure(
     token: &str,
     algorithm: CongestionControl,
     payload: Bytes,
+    gso_enabled: bool,
 ) -> LabResult<Value> {
+    let mut transport = htrio::http3::TransportConfig::default();
+    transport.enable_segmentation_offload(gso_enabled);
     let client = htrio::Client::builder()
         .no_proxy()
         .tls_certs_only([certificate])
         .http3_prior_knowledge()
+        .http3_transport_config(transport)
         .http3_congestion_control(algorithm)
         .redirect(htrio::redirect::Policy::none())
         .retry(htrio::retry::never())
@@ -287,6 +304,14 @@ async fn measure(
     rtts.push(connection.rtt().as_secs_f64() * 1000.0);
     rtts.sort_by(f64::total_cmp);
     let after = connection.stats();
+    let udp_tx_datagrams = after
+        .udp_tx
+        .datagrams
+        .saturating_sub(before.udp_tx.datagrams);
+    let udp_tx_ios = after.udp_tx.ios.saturating_sub(before.udp_tx.ios);
+    if !gso_enabled && udp_tx_datagrams != udp_tx_ios {
+        return Err(invalid("GSO-disabled upload still batched UDP datagrams").into());
+    }
     let sent = after
         .path
         .sent_packets
@@ -299,6 +324,7 @@ async fn measure(
         "status": "ok", "elapsed_s": elapsed, "upload_mbps": bytes as f64 * 8.0 / elapsed / 1_000_000.0,
         "baseline_rtt_ms": baseline_rtt_ms, "p95_smoothed_rtt_ms": rtts[(95 * rtts.len()).div_ceil(100) - 1],
         "rtt_samples": rtts.len(), "sent_packets": sent, "lost_packets": lost,
+        "udp_tx_datagrams": udp_tx_datagrams, "udp_tx_ios": udp_tx_ios,
         "lost_bytes": after.path.lost_bytes.saturating_sub(before.path.lost_bytes),
         "congestion_events": after.path.congestion_events.saturating_sub(before.path.congestion_events),
         "final_cwnd": after.path.cwnd, "mtu": after.path.current_mtu,

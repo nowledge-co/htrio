@@ -49,7 +49,7 @@ def write_json(path, value):
     )
 
 
-def receipt_run(args, output, argv, environment=None):
+def receipt_run(args, output, argv, environment=None, expected_gso_enabled=None):
     with (
         (output / "receipts.jsonl").open("w") as receipts,
         (output / "client.stderr").open("w") as errors,
@@ -84,12 +84,16 @@ def receipt_run(args, output, argv, environment=None):
     actual = [
         (record["trial"], record["position"], record["algorithm"]) for record in records
     ]
+    transport_config_matches = expected_gso_enabled is None or all(
+        record.get("gso_enabled") is expected_gso_enabled for record in records
+    )
     return dict(
         client_exit_code=result.returncode,
         summary_exit_code=summary.returncode,
         expected_attempts=len(expected),
         recorded_attempts=len(records),
-        complete=actual == expected,
+        complete=actual == expected and transport_config_matches,
+        transport_config_matches=transport_config_matches,
         successful_attempts=sum(record["status"] == "ok" for record in records),
     )
 
@@ -209,6 +213,7 @@ def netem(args, output, metadata):
         profiles=args.profiles,
         seed=args.seed,
         container_limits=dict(cpus=2, memory_mib=512, pids=128),
+        transport_gso_enabled=False,
     )
     metadata["docker"] = json.loads(
         command(["docker", "info", "--format", "{{json .}}"])
@@ -255,7 +260,9 @@ def netem(args, output, metadata):
     prefix = "htrio-lab-" + uuid.uuid4().hex[:12]
     containers = []
     network_created = False
-    environment = dict(os.environ, HTRIO_LAB_TOKEN=secrets.token_hex(24))
+    environment = dict(
+        os.environ, HTRIO_LAB_TOKEN=secrets.token_hex(24), HTRIO_LAB_DISABLE_GSO="1"
+    )
     measurements = {}
     metadata["measurements"] = measurements
     try:
@@ -263,6 +270,7 @@ def netem(args, output, metadata):
         network_created = True
         server, client = prefix + "-server", prefix + "-client"
         for name in (server, client):
+            containers.append(name)
             command(
                 [
                     "docker",
@@ -288,13 +296,14 @@ def netem(args, output, metadata):
                     "128",
                     "--env",
                     "HTRIO_LAB_TOKEN",
+                    "--env",
+                    "HTRIO_LAB_DISABLE_GSO",
                     args.image,
                     "sleep",
                     "infinity",
                 ],
                 env=environment,
             )
-            containers.append(name)
         # The background process has no host port, host mount, or host network access.
         command(
             [
@@ -362,6 +371,7 @@ def netem(args, output, metadata):
                     str(args.bytes),
                     str(args.runs),
                 ],
+                expected_gso_enabled=False,
             )
             measurements[name] = result
             snapshot(containers, directory, "after")
@@ -453,7 +463,7 @@ def main():
     success = False
     try:
         success = (collect if args.mode == "collect" else netem)(args, output, metadata)
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         metadata["error"] = str(error)
         if isinstance(error, subprocess.CalledProcessError):
             metadata["command_stderr"] = error.stderr

@@ -90,7 +90,7 @@ warmup remains, so this is not a cold-start measurement.
 
 ## Portable result bundles
 
-After building the native example, use the Python 3 standard-library collector
+After building the native example, use the Python 3.9+ standard-library collector
 instead of redirecting JSONL manually. Keep the same server running while
 switching the client's access network:
 
@@ -118,7 +118,7 @@ This command builds the Linux example and collects all four network profiles:
 python3 scripts/run-bbr-lab.py netem --runs 3
 ```
 
-It requires Docker and Python 3 on the host. No host ports or host directories
+It requires Docker and Python 3.9+ on the host. No host ports or host directories
 are mounted into the experiment. Two temporary containers use an internal bridge;
 only their own network interfaces receive `NET_ADMIN` shaping. Each container
 has a two-CPU quota and 512 MiB memory limit. The collector removes its own
@@ -137,8 +137,14 @@ The queue limit includes packets held for simulated propagation and rate
 serialization; it is not an additional queue-time budget. Seed 7 is used on
 the client and seed 8 on the server. Fixed seeds do not give different
 algorithms identical loss traces because their packet timings differ.
-GSO, GRO and UDP segmentation are disabled and checked before impairment;
-otherwise a single emulated loss might drop an entire offloaded batch.
+The containers set `HTRIO_LAB_DISABLE_GSO=1` to disable QUIC transmit GSO on
+both endpoints. The upload also verifies that transmitted UDP datagram and
+transmit-operation counts agree. GSO, GRO and UDP segmentation are disabled
+on the interfaces as well; ethtool alone does not prevent software GSO batches
+from entering a qdisc before segmentation. Otherwise a queue entry or emulated
+loss could represent an entire batch rather than a packet. Real-network runs
+leave transport GSO enabled unless this variable is explicitly set. Receipts
+record `gso_enabled`, and summaries keep different settings in separate groups.
 
 The bundle includes the exact image ID, Docker/kernel details, profile parameters,
 offload state, qdisc configuration/counters before and after uploads, RTT probes,

@@ -41,14 +41,45 @@ class ReceiptCollectionTest(unittest.TestCase):
             congestion_events=1,
         )
 
-    def run_fixture(self, output, receipts, exit_code):
+    def run_fixture(self, output, receipts, exit_code, expected_gso_enabled=None):
         fixture = output / "fixture.py"
         fixture.write_text(
             f"print({repr(chr(10).join(json.dumps(r) for r in receipts))})\nraise SystemExit({exit_code})\n"
         )
         return LAB.receipt_run(
-            argparse.Namespace(runs=1), output, [sys.executable, str(fixture)]
+            argparse.Namespace(runs=1),
+            output,
+            [sys.executable, str(fixture)],
+            expected_gso_enabled=expected_gso_enabled,
         )
+
+    def test_netem_rejects_receipts_without_transport_gso_confirmation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            records = [
+                self.receipt("cubic", 1),
+                self.receipt("bbr1", 2),
+                self.receipt("bbr3", 3),
+            ]
+            result = self.run_fixture(
+                Path(temporary), records, 0, expected_gso_enabled=False
+            )
+            self.assertFalse(result["transport_config_matches"])
+            self.assertFalse(result["complete"])
+
+    def test_summary_keeps_transport_gso_settings_separate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            records = [
+                dict(self.receipt("cubic", 1), gso_enabled=enabled)
+                for enabled in (True, False)
+            ]
+            self.run_fixture(output, records, 0)
+            groups = [
+                json.loads(line)
+                for line in (output / "summary.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(len(groups), 2)
+            self.assertEqual({group["gso_enabled"] for group in groups}, {True, False})
 
     def test_nonzero_exit_keeps_failed_attempt_and_summary(self):
         with tempfile.TemporaryDirectory() as temporary:
