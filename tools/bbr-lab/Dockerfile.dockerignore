@@ -1,0 +1,6 @@
+.git
+target
+**/target
+.context
+artifacts
+*.jsonl

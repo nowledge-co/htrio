@@ -88,6 +88,79 @@ observations at completion, not a configured loss probability. Warmup traffic is
 excluded from counter deltas and elapsed time; congestion-window history from
 warmup remains, so this is not a cold-start measurement.
 
+## Portable result bundles
+
+After building the native example, use the Python 3 standard-library collector
+instead of redirecting JSONL manually. Keep the same server running while
+switching the client's access network:
+
+```sh
+export HTRIO_LAB_TOKEN=replaceWithTheSameLongRandomTokenOnBothHosts
+python3 scripts/run-bbr-lab.py collect https://lab.example.test:4433/ \
+  ./lab-ca.pem home-wifi --bytes 8388608 --runs 10 \
+  --note "Home Wi-Fi to the fixed lab server; no VPN or competing uploads"
+```
+
+The final `Send back:` line identifies a `.tar.gz` archive with a SHA256 sidecar.
+It contains raw attempts, success/failure summaries, stderr, timestamps,
+source/binary identities, OS/architecture, parameters and your note. Peer
+addresses are present in successful receipts. The collector does not include
+the shared token, private keys, or an environment-variable dump. Nonzero exits
+and interrupted runs still produce a bundle; an incomplete receipt sequence is
+marked incomplete rather than treated as a successful run. Use a new label and
+output directory for each network. `--binary` selects a separately built example.
+
+## Isolated Docker/netem experiment
+
+This command builds the Linux example and collects all four network profiles:
+
+```sh
+python3 scripts/run-bbr-lab.py netem --runs 3
+```
+
+It requires Docker and Python 3 on the host. No host ports or host directories
+are mounted into the experiment. Two temporary containers use an internal bridge;
+only their own network interfaces receive `NET_ADMIN` shaping. Each container
+has a two-CPU quota and 512 MiB memory limit. The collector removes its own
+containers and bridge after completion or interruption. Existing Docker resources
+are untouched.
+
+| Profile | Nominal RTT | Rate in each direction | Jitter per direction | Random loss per direction | Queue limit per direction |
+| --- | --- | --- | --- | --- | --- |
+| clean | 40 ms | 10 Mbit/s | 0 ms | 0% | 128 packets |
+| long-rtt | 160 ms | 10 Mbit/s | 0 ms | 0% | 256 packets |
+| lossy | 40 ms | 10 Mbit/s | 5 ms | 1% | 128 packets |
+| slow | 80 ms | 2 Mbit/s | 5 ms | 0.1% | 64 packets |
+
+The `tc netem` qdisc combines rate, delay and loss on each endpoint's egress.
+The queue limit includes packets held for simulated propagation and rate
+serialization; it is not an additional queue-time budget. Seed 7 is used on
+the client and seed 8 on the server. Fixed seeds do not give different
+algorithms identical loss traces because their packet timings differ.
+GSO, GRO and UDP segmentation are disabled and checked before impairment;
+otherwise a single emulated loss might drop an entire offloaded batch.
+
+The bundle includes the exact image ID, Docker/kernel details, profile parameters,
+offload state, qdisc configuration/counters before and after uploads, RTT probes,
+server/client logs and per-attempt results. The collector fails if shaping or
+offload configuration fails, and checks that RTT probes confirm the imposed delay.
+Linux scheduling and timer granularity can affect `netem` rates and burstiness;
+Docker Desktop also adds its VM and CPU effects. These are emulated single-flow
+baselines, not physical-network or concurrent-flow fairness measurements.
+See the [netem manual](https://man7.org/linux/man-pages/man8/tc-netem.8.html).
+
+For a quick smoke run, select profiles and reduce the payload/repetitions:
+
+```sh
+python3 scripts/run-bbr-lab.py netem --profiles clean lossy --runs 1 --bytes 262144
+```
+
+`--skip-build --image IMAGE` reuses an existing lab image and records its ID;
+otherwise the current source is built with two Cargo jobs. The manual
+`Congestion qualification` GitHub Actions workflow runs this same experiment and
+uploads the archive even on failure. PR checks run the deterministic model and
+collector regression tests; the Docker experiment is opt-in.
+
 ## Collection protocol
 
 For each network, record its access type, approximate location pair, wired/Wi-Fi
