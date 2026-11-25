@@ -5,6 +5,20 @@
 Security fixes are provided for the latest released minor version. Users should
 upgrade to the latest `htrio` release before reporting a suspected regression.
 
+## Dependency security updates
+
+Keep Dependabot alerts and Dependabot security updates enabled in the repository
+settings. When GitHub detects a vulnerable dependency with an available fix,
+Dependabot attempts to open a pull request against `main`.
+
+The Dependabot configuration covers the root Cargo workspace, the independent
+`fuzz/` workspace, and GitHub Actions. Weekly version updates are grouped
+separately; security updates use individual pull requests and do not wait for
+the weekly version-update schedule. Normal review and CI requirements apply.
+
+Protocol sources maintained under `crates/` also require upstream review;
+Dependabot does not merge upstream source changes into these local forks.
+
 ## Reporting a vulnerability
 
 Please use GitHub's private vulnerability reporting for this repository. Do not

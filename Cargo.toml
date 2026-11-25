@@ -158,7 +158,7 @@ tokio-rustls = { version = "0.26", optional = true, default-features = false, fe
 rustls-platform-verifier = { version = ">=0.6.0, <0.8.0", optional = true }
 
 ## cookies
-cookie_crate = { version = "0.18.0", package = "cookie", optional = true }
+cookie_crate = { version = "0.18.3", package = "cookie", optional = true }
 cookie_store = { version = "0.22.0", optional = true }
 
 ## stream
