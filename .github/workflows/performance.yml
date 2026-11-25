@@ -1,6 +1,11 @@
 name: Congestion qualification
 
 on:
+  pull_request:
+    paths:
+      - "crates/htrio-quinn-proto/src/congestion/**"
+      - "crates/htrio-quinn-proto/src/congestion.rs"
+      - ".github/workflows/performance.yml"
   schedule:
     - cron: "37 20 * * 5"
   workflow_dispatch:
@@ -24,6 +29,13 @@ jobs:
           set -o pipefail
           cargo test -p htrio-quinn-proto --locked \
             congestion::qualification::shared_bottleneck_matrix \
+            -- --ignored --nocapture | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Record opt-in network profile baselines
+        run: |
+          set -o pipefail
+          cargo test -p htrio-quinn-proto --locked -j 2 --lib \
+            congestion::qualification::network_profile_matrix \
             -- --ignored --nocapture | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Compile public-client performance benchmarks

@@ -4169,6 +4169,122 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "rustls-ring")]
+    fn path_validation_connection(now: Instant, remote: SocketAddr) -> Connection {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert.cert.der().clone()).unwrap();
+        let config = crate::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+        let mut endpoint =
+            crate::Endpoint::new(Arc::new(EndpointConfig::default()), None, true, None);
+        let (_, mut conn) = endpoint.connect(now, config, remote, "localhost").unwrap();
+        // These unit tests start after authentication/deduplication and exercise
+        // the real payload and timer handlers without depending on socket timing.
+        conn.path.validated = true;
+        conn
+    }
+
+    #[cfg(feature = "rustls-ring")]
+    fn deliver_path_frames(
+        conn: &mut Connection,
+        now: Instant,
+        remote: SocketAddr,
+        number: u64,
+        payload: Vec<u8>,
+    ) {
+        conn.spaces[SpaceId::Data].dedup.insert(number);
+        conn.process_payload(
+            now,
+            remote,
+            number,
+            Packet {
+                header: Header::Short {
+                    spin: false,
+                    key_phase: false,
+                    dst_cid: ConnectionId::new(&[]),
+                    number: PacketNumber::U8(number as u8),
+                },
+                header_data: Bytes::new(),
+                payload: payload.as_slice().into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "rustls-ring")]
+    #[test]
+    fn cancelled_validation_rejects_stale_and_wrong_path_responses() {
+        let now = Instant::now();
+        let original: SocketAddr = "[::1]:4433".parse().unwrap();
+        for candidate in ["127.0.0.1:4434", "[::1]:4434"] {
+            let candidate: SocketAddr = candidate.parse().unwrap();
+            let mut conn = path_validation_connection(now, original);
+            conn.migrate(now, candidate);
+            let old_token = conn.path.challenge.unwrap();
+            conn.timers.set(Timer::PathValidation, now);
+            conn.handle_timeout(now);
+            assert_eq!(conn.path.remote, original);
+            assert!(conn.path.challenge.is_none());
+            assert!(!conn.path.challenge_pending);
+
+            conn.migrate(now, candidate);
+            let token = conn.path.challenge.unwrap();
+            assert_ne!(old_token, token);
+            for (number, response_token, source) in [
+                (1, old_token, candidate),
+                (2, token, original),
+                (3, token, candidate),
+            ] {
+                let mut payload = Vec::new();
+                payload.write(frame::FrameType::PATH_RESPONSE);
+                payload.write(response_token);
+                deliver_path_frames(&mut conn, now, source, number, payload);
+                assert_eq!(conn.path.validated, number == 3);
+                assert_eq!(
+                    conn.path.challenge,
+                    if number == 3 { None } else { Some(token) }
+                );
+            }
+            assert!(conn.timers.get(Timer::PathValidation).is_none());
+            assert!(conn
+                .prev_path
+                .as_ref()
+                .is_some_and(|(_, path)| path.challenge.is_none() && !path.challenge_pending));
+        }
+    }
+
+    #[cfg(feature = "rustls-ring")]
+    #[test]
+    fn reverse_path_challenge_survives_response_frame_order() {
+        let now = Instant::now();
+        let original: SocketAddr = "[::1]:4433".parse().unwrap();
+        for candidate in ["127.0.0.1:4434", "[::1]:4434"] {
+            for response_first in [true, false] {
+                let candidate: SocketAddr = candidate.parse().unwrap();
+                let mut conn = path_validation_connection(now, original);
+                conn.migrate(now, candidate);
+                let token = conn.path.challenge.unwrap();
+                let reverse_token = 123_u64;
+                let mut payload = Vec::new();
+                for response in [response_first, !response_first] {
+                    payload.write(if response {
+                        frame::FrameType::PATH_RESPONSE
+                    } else {
+                        frame::FrameType::PATH_CHALLENGE
+                    });
+                    payload.write(if response { token } else { reverse_token });
+                }
+                deliver_path_frames(&mut conn, now, candidate, 1, payload);
+                assert!(conn.path.validated);
+                assert_eq!(
+                    conn.path_responses.pop_on_path(candidate),
+                    Some(reverse_token)
+                );
+                assert!(conn.path_responses.is_empty());
+            }
+        }
+    }
+
+    #[cfg(feature = "rustls-ring")]
     #[test]
     fn ack_frequency_frames_require_one_rtt() {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
