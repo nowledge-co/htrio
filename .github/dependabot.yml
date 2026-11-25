@@ -1,7 +1,9 @@
 version: 2
 updates:
   - package-ecosystem: cargo
-    directory: /
+    directories:
+      - /
+      - /fuzz
     schedule:
       interval: weekly
       day: monday
@@ -10,6 +12,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       cargo-minor-and-patch:
+        applies-to: version-updates
         update-types:
           - minor
           - patch
@@ -24,5 +27,6 @@ updates:
     open-pull-requests-limit: 3
     groups:
       actions:
+        applies-to: version-updates
         patterns:
           - "*"
