@@ -1,6 +1,13 @@
 name: Congestion qualification
 
 on:
+  pull_request:
+    paths:
+      - "crates/htrio-quinn-proto/src/congestion/**"
+      - "crates/htrio-quinn-proto/src/congestion.rs"
+      - ".github/workflows/performance.yml"
+      - "scripts/*bbr*"
+      - "tools/bbr-lab/**"
   schedule:
     - cron: "37 20 * * 5"
   workflow_dispatch:
@@ -26,5 +33,35 @@ jobs:
             congestion::qualification::shared_bottleneck_matrix \
             -- --ignored --nocapture | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Validate receipt completeness and failure retention
+        run: python3 -m unittest discover -s scripts -p test_bbr_lab.py
+
+      - name: Record opt-in network profile baselines
+        run: |
+          set -o pipefail
+          cargo test -p htrio-quinn-proto --locked -j 2 --lib \
+            congestion::qualification::network_profile_matrix \
+            -- --ignored --nocapture | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Compile public-client performance benchmarks
         run: cargo check --locked --no-default-features --features http3 --benches
+
+  netem-upload:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Collect isolated Docker/netem upload baselines
+        run: python3 scripts/run-bbr-lab.py netem --output artifacts/netem --runs 3
+      - name: Preserve raw receipts and failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bbr-netem-${{ github.sha }}
+          path: |
+            artifacts/netem.tar.gz
+            artifacts/netem.tar.gz.sha256
+          if-no-files-found: error

@@ -1,0 +1,11 @@
+.git
+target
+**/target
+.context
+artifacts
+*.jsonl
+.env
+.env.*
+**/.env
+**/.env.*
+**/__pycache__

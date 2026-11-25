@@ -165,6 +165,21 @@ mod qualification {
     const MSS: u64 = 1200;
     const LINK_BYTES_PER_SECOND: u64 = 1_250_000;
     const RTT_NS: u64 = 40_000_000;
+
+    #[derive(Clone, Copy)]
+    struct Network {
+        name: &'static str,
+        bytes_per_second: u64,
+        rtt_ns: u64,
+        queue_ns: u64,
+    }
+
+    const DEFAULT_NETWORK: Network = Network {
+        name: "baseline",
+        bytes_per_second: LINK_BYTES_PER_SECOND,
+        rtt_ns: RTT_NS,
+        queue_ns: RTT_NS * 2,
+    };
     const RUN_NS: u64 = 30_000_000_000;
     const WARMUP_NS: u64 = 10_000_000_000;
 
@@ -176,6 +191,7 @@ mod qualification {
         pn: u64,
         delivered: u64,
         lost: u64,
+        ack_rtts_ns: Vec<u64>,
     }
 
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -193,6 +209,7 @@ mod qualification {
         lost: [u64; 2],
         fairness: f64,
         utilization: f64,
+        p95_rtt_ms: [f64; 2],
     }
 
     fn factory(name: &str, seed: [u8; 16]) -> Arc<dyn ControllerFactory> {
@@ -213,21 +230,26 @@ mod qualification {
     }
 
     fn run(left: &str, right: &str) -> Result {
+        run_network(left, right, DEFAULT_NETWORK, 1)
+    }
+
+    fn run_network(left: &str, right: &str, network: Network, seed: u8) -> Result {
         let base = Instant::now();
-        let mut flows = [(left, [1; 16]), (right, [2; 16])].map(|(name, seed)| Flow {
+        let mut flows = [(left, [seed; 16]), (right, [seed + 1; 16])].map(|(name, seed)| Flow {
             controller: factory(name, seed).build(base, MSS as u16),
-            rtt: RttEstimator::new(Duration::from_nanos(RTT_NS)),
+            rtt: RttEstimator::new(Duration::from_nanos(network.rtt_ns)),
             inflight: 0,
             next_send_ns: 0,
             pn: 0,
             delivered: 0,
             lost: 0,
+            ack_rtts_ns: Vec::new(),
         });
         let mut events: BinaryHeap<Reverse<Event>> = BinaryHeap::new();
         let mut now_ns = 0;
-        let mut bottleneck_free_ns = RTT_NS / 2;
-        let service_ns = MSS * 1_000_000_000 / LINK_BYTES_PER_SECOND;
-        let queue_limit_ns = RTT_NS * 2;
+        let mut bottleneck_free_ns = network.rtt_ns / 2;
+        let service_ns = MSS * 1_000_000_000 / network.bytes_per_second;
+        let queue_limit_ns = network.queue_ns;
 
         while now_ns < RUN_NS {
             let next_event_ns = events.peek().map_or(u64::MAX, |event| event.0.at_ns);
@@ -246,6 +268,9 @@ mod qualification {
             }
 
             if let Some(index) = send_flow.filter(|_| send_ns <= next_event_ns) {
+                if send_ns >= RUN_NS {
+                    break;
+                }
                 now_ns = send_ns;
                 let flow = &mut flows[index];
                 let now = base + Duration::from_nanos(now_ns);
@@ -256,13 +281,13 @@ mod qualification {
                 flow.controller.on_sent(now, MSS, pn);
                 flow.inflight += MSS;
 
-                let arrival_ns = now_ns + RTT_NS / 2;
+                let arrival_ns = now_ns + network.rtt_ns / 2;
                 let service_start_ns = arrival_ns.max(bottleneck_free_ns);
                 let (at_ns, acked) = if service_start_ns - arrival_ns > queue_limit_ns {
-                    (now_ns + RTT_NS, false)
+                    (now_ns + network.rtt_ns, false)
                 } else {
                     bottleneck_free_ns = service_start_ns + service_ns;
-                    (bottleneck_free_ns + RTT_NS / 2, true)
+                    (bottleneck_free_ns + network.rtt_ns / 2, true)
                 };
                 events.push(Reverse(Event {
                     at_ns,
@@ -283,6 +308,9 @@ mod qualification {
             let Reverse(event) = events
                 .pop()
                 .expect("simulation has no send or feedback event");
+            if event.at_ns >= RUN_NS {
+                break;
+            }
             now_ns = event.at_ns;
             let flow = &mut flows[event.flow];
             flow.inflight -= MSS;
@@ -305,6 +333,7 @@ mod qualification {
                     .update(Duration::ZERO, Duration::from_nanos(now_ns - event.send_ns));
                 if now_ns >= WARMUP_NS {
                     flow.delivered += MSS;
+                    flow.ack_rtts_ns.push(now_ns - event.send_ns);
                 }
             } else {
                 flow.controller
@@ -321,14 +350,83 @@ mod qualification {
         let sum = (delivered[0] + delivered[1]) as f64;
         let squares = (delivered[0] as f64).powi(2) + (delivered[1] as f64).powi(2);
         let fairness = sum.powi(2) / (2.0 * squares);
-        let capacity =
-            LINK_BYTES_PER_SECOND as f64 * Duration::from_nanos(RUN_NS - WARMUP_NS).as_secs_f64();
+        let capacity = network.bytes_per_second as f64
+            * Duration::from_nanos(RUN_NS - WARMUP_NS).as_secs_f64();
 
         Result {
             delivered,
             lost,
             fairness,
             utilization: sum / capacity,
+            p95_rtt_ms: flows.each_mut().map(|flow| {
+                flow.ack_rtts_ns.sort_unstable();
+                let n = flow.ack_rtts_ns.len();
+                assert!(n > 0, "flow delivered no measurement samples");
+                flow.ack_rtts_ns[(95 * n).div_ceil(100) - 1] as f64 / 1_000_000.0
+            }),
+        }
+    }
+
+    #[test]
+    fn network_profiles_are_reproducible() {
+        let first = run_network("bbr3", "cubic", DEFAULT_NETWORK, 7);
+        let second = run_network("bbr3", "cubic", DEFAULT_NETWORK, 7);
+        assert_eq!(first.delivered, second.delivered);
+        assert_eq!(first.lost, second.lost);
+        assert_eq!(first.p95_rtt_ms, second.p95_rtt_ms);
+    }
+
+    #[test]
+    #[ignore = "opt-in network profile experiment; records baselines without tuning floors"]
+    fn network_profile_matrix() {
+        let networks = [
+            DEFAULT_NETWORK,
+            Network {
+                name: "shallow",
+                queue_ns: RTT_NS / 2,
+                ..DEFAULT_NETWORK
+            },
+            Network {
+                name: "long-rtt",
+                rtt_ns: 160_000_000,
+                queue_ns: 80_000_000,
+                ..DEFAULT_NETWORK
+            },
+            Network {
+                name: "slow-link",
+                bytes_per_second: 250_000,
+                ..DEFAULT_NETWORK
+            },
+        ];
+        println!("model,profile,left,right,seed,left_bytes,right_bytes,left_lost_bytes,right_lost_bytes,jain,utilization,left_p95_ack_rtt_ms,right_p95_ack_rtt_ms");
+        for network in networks {
+            for (left, right) in [
+                ("bbr3", "bbr3"),
+                ("bbr3", "bbr1"),
+                ("bbr1", "bbr3"),
+                ("bbr3", "cubic"),
+                ("cubic", "bbr3"),
+            ] {
+                for seed in [1, 7, 19] {
+                    let result = run_network(left, right, network, seed);
+                    println!(
+                        "model,{},{left},{right},{seed},{},{},{},{},{:.6},{:.6},{:.3},{:.3}",
+                        network.name,
+                        result.delivered[0],
+                        result.delivered[1],
+                        result.lost[0],
+                        result.lost[1],
+                        result.fairness,
+                        result.utilization,
+                        result.p95_rtt_ms[0],
+                        result.p95_rtt_ms[1]
+                    );
+                    assert!(
+                        result.fairness.is_finite() && (0.5..=1.000_001).contains(&result.fairness)
+                    );
+                    assert!(result.utilization > 0.0 && result.utilization <= 1.01);
+                }
+            }
         }
     }
 

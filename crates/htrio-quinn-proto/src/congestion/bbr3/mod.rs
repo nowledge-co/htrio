@@ -7096,6 +7096,72 @@ mod test {
     }
 
     #[test]
+    fn restored_sampler_tracks_packets_not_packet_number_span() {
+        let mut config = Bbr3Config::default();
+        config.probe_rng_seed([9; 16]);
+        let mut original = Bbr3::new(Arc::new(config), 1200);
+        let start = Instant::now();
+        let rtt = RttEstimator::new(Duration::from_millis(10));
+        Controller::on_packet_sent(&mut original, start, 1200, 1, SpaceId::Data);
+        let ack = start + Duration::from_millis(10);
+        Controller::on_packet_acked(
+            &mut original,
+            ack,
+            start,
+            1200,
+            1,
+            SpaceId::Data,
+            false,
+            &rtt,
+        );
+        Controller::on_end_acks(&mut original, ack, 0, false, Some(1));
+
+        // Path rollback restores a snapshot while connection packet numbers keep advancing.
+        let mut restored = original.clone_box();
+        let restored = restored.as_mut();
+        let pn = 1_u64 << 40;
+        restored.on_packet_sent(ack, 1200, pn, SpaceId::Data);
+        let end = ack + Duration::from_millis(10);
+        restored.on_packet_acked(end, ack, 1200, pn, SpaceId::Data, false, &rtt);
+        restored.on_end_acks(end, 0, false, Some(pn));
+        let restored = restored.clone_box().into_any().downcast::<Bbr3>().unwrap();
+        assert!(restored.packets.iter().map(VecDeque::len).sum::<usize>() <= 2);
+        assert_eq!(restored.delivered, 2400);
+        assert_eq!(restored.inflight, 0);
+        assert_eq!(
+            original.delivered, 1200,
+            "restoring a snapshot must not mutate the original"
+        );
+    }
+
+    #[test]
+    fn losses_retire_samples_before_an_idle_restart() {
+        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), 1200);
+        let start = Instant::now();
+        for (space, pn) in [
+            (SpaceId::Initial, 0),
+            (SpaceId::Handshake, 0),
+            (SpaceId::Data, 0),
+        ] {
+            Controller::on_packet_sent(&mut bbr, start, 1200, pn, space);
+            Controller::on_packet_lost(
+                &mut bbr,
+                start + Duration::from_millis(10),
+                1200,
+                pn,
+                space,
+            );
+            assert!(bbr.packets[space as usize].is_empty());
+        }
+        assert_eq!(bbr.inflight, 0);
+        let restart = start + Duration::from_secs(30);
+        Controller::on_packet_sent(&mut bbr, restart, 1200, 1_000_000, SpaceId::Data);
+        let sample = bbr.packets[SpaceId::Data as usize].back().unwrap();
+        assert_eq!(sample.tx_in_flight, 1200);
+        assert_eq!(sample.first_send_time, restart);
+    }
+
+    #[test]
     fn unresolved_head_packet_does_not_pin_the_queue() {
         let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), 1200);
         let rtt = RttEstimator::new(Duration::from_millis(10));
