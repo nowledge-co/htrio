@@ -93,7 +93,7 @@ default-features = false
 version = "0.1.2"
 
 [dependencies.qlog]
-version = "0.15.2"
+version = "0.18.2"
 optional = true
 
 [dependencies.rand]
