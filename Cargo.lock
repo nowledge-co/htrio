@@ -2648,14 +2648,14 @@ dependencies = [
 
 [[package]]
 name = "qlog"
-version = "0.15.2"
+version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f15b83c59e6b945f2261c95a1dd9faf239187f32ff0a96af1d1d28c4557f919"
+checksum = "1a2a344e91e2b69996227f8cbc7c7a37b29498d8e7ea5fe394170a55fb31c381"
 dependencies = [
+ "humantime",
  "serde",
  "serde_json",
  "serde_with",
- "smallvec",
 ]
 
 [[package]]
@@ -3144,9 +3144,6 @@ name = "smallvec"
 version = "1.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "smol"
