@@ -208,6 +208,37 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "microbenchmark; run in release mode with a single test thread"]
+    fn in_order_ack_benchmark() {
+        const ACKS: usize = 32_768;
+        const CHUNK_LEN: usize = 1200;
+        const SAMPLES: usize = 11;
+
+        let data = Bytes::from(vec![0x5a; ACKS * CHUNK_LEN]);
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut checksum = 0_u64;
+        for _ in 0..SAMPLES {
+            let mut buf = SendBuffer::new();
+            buf.write(data.clone());
+
+            let started = std::time::Instant::now();
+            for index in 0..ACKS {
+                let start = std::hint::black_box((index * CHUNK_LEN) as u64);
+                buf.ack(start..start + CHUNK_LEN as u64);
+            }
+            let elapsed = started.elapsed().as_nanos() as u64;
+            checksum += u64::from(std::hint::black_box(buf.is_fully_acked()));
+            samples.push(elapsed);
+        }
+        samples.sort_unstable();
+        let median_ns = samples[SAMPLES / 2];
+        println!(
+            "{{\"benchmark\":\"send_buffer_in_order_ack\",\"acks\":{ACKS},\"chunk_len\":{CHUNK_LEN},\"median_ns\":{median_ns},\"ns_per_ack\":{:.2},\"checksum\":{checksum}}}",
+            median_ns as f64 / ACKS as f64
+        );
+    }
+
+    #[test]
     fn fragment_with_length() {
         let mut buf = SendBuffer::new();
         const MSG: &[u8] = b"Hello, world!";
