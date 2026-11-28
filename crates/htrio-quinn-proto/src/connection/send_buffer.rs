@@ -208,6 +208,42 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "microbenchmark; run in release mode with a single test thread"]
+    fn sequential_get_benchmark() {
+        const SEGMENTS: usize = 1024;
+        const SEGMENT_LEN: usize = 1200;
+        const ROUNDS: usize = 32;
+        const SAMPLES: usize = 11;
+
+        let mut buf = SendBuffer::new();
+        let segment = Bytes::from(vec![0x5a; SEGMENT_LEN]);
+        for _ in 0..SEGMENTS {
+            buf.write(segment.clone());
+        }
+
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut checksum = 0_u64;
+        for _ in 0..SAMPLES {
+            let started = std::time::Instant::now();
+            for _ in 0..ROUNDS {
+                for index in 0..SEGMENTS {
+                    let start = std::hint::black_box((index * SEGMENT_LEN) as u64);
+                    let data = std::hint::black_box(buf.get(start..start + SEGMENT_LEN as u64));
+                    checksum = checksum.wrapping_add(std::hint::black_box(data[0] as u64));
+                }
+            }
+            samples.push(started.elapsed().as_nanos() as u64);
+        }
+        samples.sort_unstable();
+        let median_ns = samples[SAMPLES / 2];
+        let lookups = (SEGMENTS * ROUNDS) as u64;
+        println!(
+            "{{\"benchmark\":\"send_buffer_sequential_get\",\"segments\":{SEGMENTS},\"segment_len\":{SEGMENT_LEN},\"lookups\":{lookups},\"median_ns\":{median_ns},\"ns_per_lookup\":{:.2},\"checksum\":{checksum}}}",
+            median_ns as f64 / lookups as f64
+        );
+    }
+
+    #[test]
     fn fragment_with_length() {
         let mut buf = SendBuffer::new();
         const MSG: &[u8] = b"Hello, world!";
