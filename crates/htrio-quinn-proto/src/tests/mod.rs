@@ -1816,6 +1816,66 @@ fn conn_flow_control() {
     );
 }
 
+/// A repeated RESET_STREAM remains harmless after another stream consumes returned flow credit.
+#[test]
+fn repeated_reset_stream_flow_control() {
+    let _guard = subscribe();
+    let mut pair = Pair::new(
+        Default::default(),
+        ServerConfig {
+            transport: Arc::new(TransportConfig {
+                receive_window: 100u32.into(),
+                ..TransportConfig::default()
+            }),
+            ..server_config()
+        },
+    );
+    let (client_ch, server_ch) = pair.connect();
+
+    let stream = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    assert_eq!(
+        pair.client_send(client_ch, stream).write(&[0xAB; 60]),
+        Ok(60)
+    );
+    pair.client_send(client_ch, stream)
+        .reset(VarInt(42))
+        .unwrap();
+    pair.drive_client();
+    let delayed = pair.server.inbound.pop_back().unwrap();
+    assert!(pair.server.inbound.is_empty());
+
+    let second_stream = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let mut written = 0;
+    for _ in 0..20 {
+        if let Ok(count) = pair
+            .client_send(client_ch, second_stream)
+            .write(&[0xCD; 80][written..])
+        {
+            written += count;
+        }
+        if written == 80 {
+            break;
+        }
+        pair.client_conn_mut(client_ch).ping();
+        pair.drive();
+    }
+    assert_eq!(written, 80, "the retransmitted reset returned its credit");
+    pair.drive();
+    let resets_received = |pair: &mut Pair| {
+        pair.server_conn_mut(server_ch)
+            .stats()
+            .frame_rx
+            .reset_stream
+    };
+    assert_eq!(resets_received(&mut pair), 1);
+
+    pair.server.inbound.push_back(delayed);
+    pair.drive();
+    assert_eq!(resets_received(&mut pair), 2);
+    assert!(!pair.server_conn_mut(server_ch).is_closed());
+    assert!(!pair.client_conn_mut(client_ch).is_closed());
+}
+
 #[test]
 fn stop_opens_bidi() {
     let _guard = subscribe();
