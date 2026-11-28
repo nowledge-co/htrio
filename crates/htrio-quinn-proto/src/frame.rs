@@ -211,6 +211,35 @@ impl Frame {
     pub(crate) fn is_ack_eliciting(&self) -> bool {
         !matches!(*self, Self::Ack(_) | Self::Padding | Self::Close(_))
     }
+
+    pub(crate) fn allow_in_0rtt(&self) -> bool {
+        use Frame::*;
+        match self {
+            Padding
+            | Ping
+            | ResetStream(_)
+            | StopSending(_)
+            | Stream(_)
+            | MaxData(_)
+            | MaxStreamData { .. }
+            | MaxStreams { .. }
+            | DataBlocked { .. }
+            | StreamDataBlocked { .. }
+            | StreamsBlocked { .. }
+            | NewConnectionId(_)
+            | PathChallenge(_)
+            | Close(_)
+            | Datagram(_) => true,
+            Ack(_)
+            | Crypto(_)
+            | NewToken(_)
+            | RetireConnectionId { .. }
+            | PathResponse(_)
+            | AckFrequency(_)
+            | ImmediateAck
+            | HandshakeDone => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -954,6 +983,47 @@ mod test {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
+    }
+
+    #[test]
+    fn zero_rtt_frame_eligibility() {
+        let allowed = [
+            Frame::Padding,
+            Frame::Ping,
+            Frame::PathChallenge(0),
+            Frame::Close(Close::Application(ApplicationClose {
+                error_code: VarInt(0),
+                reason: Bytes::new(),
+            })),
+        ];
+        assert!(allowed.iter().all(Frame::allow_in_0rtt));
+
+        let forbidden = [
+            Frame::Ack(Ack {
+                largest: 0,
+                delay: 0,
+                additional: Bytes::from_static(&[0]),
+                ecn: None,
+            }),
+            Frame::Crypto(Crypto {
+                offset: 0,
+                data: Bytes::new(),
+            }),
+            Frame::NewToken(NewToken {
+                token: Bytes::new(),
+            }),
+            Frame::RetireConnectionId { sequence: 0 },
+            Frame::PathResponse(0),
+            Frame::AckFrequency(AckFrequency {
+                sequence: VarInt(0),
+                ack_eliciting_threshold: VarInt(1),
+                request_max_ack_delay: VarInt(0),
+                reordering_threshold: VarInt(0),
+            }),
+            Frame::ImmediateAck,
+            Frame::HandshakeDone,
+        ];
+        assert!(forbidden.iter().all(|frame| !frame.allow_in_0rtt()));
     }
 
     #[test]

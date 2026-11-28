@@ -2823,18 +2823,10 @@ impl Connection {
             }
 
             let _guard = span.as_ref().map(|x| x.enter());
-            if packet.header.is_0rtt() {
-                match frame {
-                    Frame::Crypto(_)
-                    | Frame::Close(Close::Application(_))
-                    | Frame::AckFrequency(_)
-                    | Frame::ImmediateAck => {
-                        return Err(TransportError::PROTOCOL_VIOLATION(
-                            "illegal frame type in 0-RTT",
-                        ));
-                    }
-                    _ => {}
-                }
+            if packet.header.is_0rtt() && !frame.allow_in_0rtt() {
+                let mut error = TransportError::PROTOCOL_VIOLATION("illegal frame type in 0-RTT");
+                error.frame = Some(frame.ty());
+                return Err(error);
             }
             ack_eliciting |= frame.is_ack_eliciting();
 
@@ -4341,9 +4333,15 @@ mod tests {
                     },
                 );
                 if zero_rtt {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.code, TransportErrorCode::PROTOCOL_VIOLATION);
                     assert_eq!(
-                        result.unwrap_err().code,
-                        TransportErrorCode::PROTOCOL_VIOLATION
+                        error.frame,
+                        Some(if immediate {
+                            frame::FrameType::IMMEDIATE_ACK
+                        } else {
+                            frame::FrameType::ACK_FREQUENCY
+                        })
                     );
                     assert_eq!(conn.ack_frequency.max_ack_delay, Duration::from_millis(25));
                 } else {
