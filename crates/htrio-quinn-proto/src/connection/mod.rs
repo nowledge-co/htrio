@@ -2085,6 +2085,7 @@ impl Connection {
         );
 
         self.process_decrypted_packet(now, remote, Some(packet_number), packet.into())?;
+        self.finish_packet(now, remote, Ok(()), false, false);
         if let Some(data) = remaining {
             self.handle_coalesced(now, remote, ecn, data);
         }
@@ -2421,6 +2422,18 @@ impl Connection {
             }
         };
 
+        self.finish_packet(now, remote, result, was_closed, was_drained);
+    }
+
+    /// Apply the state transitions that follow processing a packet.
+    fn finish_packet(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        result: Result<(), ConnectionError>,
+        was_closed: bool,
+        was_drained: bool,
+    ) {
         // State transitions for error cases
         if let Err(conn_err) = result {
             self.error = Some(conn_err.clone());
